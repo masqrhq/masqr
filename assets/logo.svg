@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="masqr">
+  <title>masqr</title>
+  <!-- lens of the magnifying glass (the "q" from masqr) -->
+  <circle cx="104" cy="104" r="72" fill="none" stroke="#1E1E24" stroke-width="16"/>
+  <!-- handle (descender of the "q") -->
+  <line x1="158" y1="158" x2="218" y2="218" stroke="#1E1E24" stroke-width="18" stroke-linecap="round"/>
+  <!-- three redaction bars inside the lens: deep prompt inspection in action -->
+  <rect x="74" y="76"  width="60" height="10" rx="5" fill="#1E1E24"/>
+  <rect x="62" y="99"  width="84" height="10" rx="5" fill="#E55A3C"/>
+  <rect x="74" y="122" width="48" height="10" rx="5" fill="#1E1E24"/>
+</svg>

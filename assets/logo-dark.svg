@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="masqr">
+  <title>masqr</title>
+  <circle cx="104" cy="104" r="72" fill="none" stroke="#E8E8EB" stroke-width="16"/>
+  <line x1="158" y1="158" x2="218" y2="218" stroke="#E8E8EB" stroke-width="18" stroke-linecap="round"/>
+  <rect x="74" y="76"  width="60" height="10" rx="5" fill="#E8E8EB"/>
+  <rect x="62" y="99"  width="84" height="10" rx="5" fill="#E55A3C"/>
+  <rect x="74" y="122" width="48" height="10" rx="5" fill="#E8E8EB"/>
+</svg>

@@ -1,0 +1,23 @@
+masqr
+Copyright 2026 masqr contributors
+
+This product includes software developed by third parties. The bundled binary
+artifacts ship under their own upstream licences; see the LICENSES/ directory
+for the full texts and the disclosures below for attribution.
+
+--------------------------------------------------------------------------------
+ONNX Runtime (libonnxruntime.so.1.26.0)
+  Upstream:    https://github.com/microsoft/onnxruntime
+  Copyright:   Microsoft Corporation
+  Licence:     MIT (see LICENSES/LICENSE-onnxruntime.txt)
+  Third-party: ONNX Runtime itself bundles components under various permissive
+               licences. The upstream notices are preserved verbatim at
+               .ocr/onnxruntime-linux-x64-1.26.0/ThirdPartyNotices.txt.
+
+PaddleOCR (det.onnx, cls.onnx, rec.onnx, ppocr_keys_v1.txt)
+  Upstream:    https://github.com/PaddlePaddle/PaddleOCR
+  Copyright:   2020 PaddlePaddle Authors
+  Licence:     Apache-2.0 (see LICENSES/LICENSE-paddleocr.txt)
+  Note:        Models are PP-OCRv5 (det + cls + rec) re-exported to ONNX by
+               https://github.com/jingsongliujing/OnnxOCR (also Apache-2.0).
+--------------------------------------------------------------------------------

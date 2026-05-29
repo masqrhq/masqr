@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  # Run the full unit-test suite on the three platforms most contributors
+  # actually develop on. ARM variants are covered by the release workflow.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,  goos: linux,   goarch: amd64 }
+          - { runner: macos-latest,   goos: darwin,  goarch: arm64 }
+          - { runner: windows-latest, goos: windows, goarch: amd64 }
+    runs-on: ${{ matrix.runner }}
+    name: test ${{ matrix.goos }}/${{ matrix.goarch }}
+    steps:
+      - name: Checkout (with LFS)
+        uses: actions/checkout@v5
+        with:
+          lfs: true
+
+      - name: Verify LFS payloads
+        shell: bash
+        run: |
+          # Fail loudly if the .so/.dll/.onnx files are still pointer stubs.
+          # A real binary is hundreds of KB+; a pointer is ~130 bytes.
+          for f in .ocr/det.onnx .ocr/rec.onnx .ocr/cls.onnx; do
+            size=$(wc -c < "$f")
+            if [ "$size" -lt 100000 ]; then
+              echo "::error::$f is only $size bytes — LFS payload not pulled. Run 'git lfs pull'."
+              exit 1
+            fi
+          done
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build -v ./...
+
+      - name: go test
+        run: go test -race -count=1 -timeout 5m ./...
+
+  # Pure-Go static analysis without bringing in heavier linters yet.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go fmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: latest
+          install-go: false
+
+  # Sanity-check that the cross-compile build tags are sane, even when we
+  # can't actually run the binaries here. Each native build tests its own
+  # platform; this job catches "did I forget a build tag" mistakes.
+  build-matrix-smoke:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: list build constraints per file
+        run: |
+          for f in sources_ocr*.go; do
+            tags=$(head -1 "$f" | grep -E '^//go:build' || echo "(no build tag)")
+            printf '%-45s %s\n' "$f" "$tags"
+          done

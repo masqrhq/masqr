@@ -1,0 +1,22 @@
+# Git LFS tracks the bundled ONNX Runtime libraries and the PaddleOCR models.
+# Combined they're ~125 MB across 5 platform variants — far too large to ship
+# as regular git objects. After cloning, run:
+#
+#   git lfs install
+#   git lfs pull
+#
+# Without LFS pulled, these files are 130-byte pointers and `go build` will
+# fail at the //go:embed step with an "empty file" or "no such file" error.
+
+# ONNX Runtime shared libraries (all platforms)
+*.so          filter=lfs diff=lfs merge=lfs -text
+*.so.*        filter=lfs diff=lfs merge=lfs -text
+*.dylib       filter=lfs diff=lfs merge=lfs -text
+*.dll         filter=lfs diff=lfs merge=lfs -text
+
+# PaddleOCR PP-OCRv5 model weights
+*.onnx        filter=lfs diff=lfs merge=lfs -text
+
+# Linguist hints — keep GitHub from claiming masqr is 80% "Other binary"
+.ocr/**       linguist-vendored=true
+LICENSES/**   linguist-vendored=true

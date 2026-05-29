@@ -1,0 +1,34 @@
+# Build artifacts
+/masqr
+/masqr.exe
+/masqr-*
+/demo/demo
+/dist/
+
+# Session logs and transcripts produced at runtime
+masqr-*.log
+
+# E2E harness scratch (scripts/test-gemini-e2e.sh; use --keep-logs to retain)
+.e2e-logs/
+
+# Python venv for scripts/generate-screenshots.py (Pillow)
+.venv/
+__pycache__/
+*.pyc
+
+# Local test images, dumps, scratch
+/tmp/
+*.ocr-dump
+
+# Go test/coverage
+*.test
+*.out
+coverage.txt
+
+# Editor / IDE
+.idea/
+.vscode/
+.claude/
+*.swp
+*~
+.DS_Store

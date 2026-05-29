@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write   # uploading release assets
+
+jobs:
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,      goos: linux,   goarch: amd64, ext: ''     }
+          - { runner: ubuntu-22.04-arm,   goos: linux,   goarch: arm64, ext: ''     }
+          - { runner: macos-latest,       goos: darwin,  goarch: arm64, ext: ''     }
+          - { runner: windows-latest,     goos: windows, goarch: amd64, ext: '.exe' }
+          - { runner: windows-11-arm,     goos: windows, goarch: arm64, ext: '.exe' }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout (with LFS)
+        uses: actions/checkout@v5
+        with:
+          lfs: true
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          mkdir -p dist
+          out="dist/masqr-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          go build \
+            -trimpath \
+            -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o "$out" .
+          ls -lh "$out"
+
+      - name: Stage release archive
+        shell: bash
+        run: |
+          stem="masqr-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          bin="dist/${stem}${{ matrix.ext }}"
+          staging="dist/${stem}"
+          mkdir -p "$staging"
+          cp "$bin" "$staging/masqr${{ matrix.ext }}"
+          cp LICENSE NOTICE README.md "$staging/"
+          cp -r LICENSES "$staging/"
+          case "${{ matrix.goos }}" in
+            windows)
+              (cd dist && 7z a "${stem}.zip" "${stem}/")
+              echo "ASSET=dist/${stem}.zip" >> "$GITHUB_ENV"
+              ;;
+            *)
+              (cd dist && tar -czf "${stem}.tar.gz" "${stem}/")
+              echo "ASSET=dist/${stem}.tar.gz" >> "$GITHUB_ENV"
+              ;;
+          esac
+
+      - name: Generate sha256
+        shell: bash
+        run: |
+          asset="${{ env.ASSET }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$asset" > "${asset}.sha256"
+          else
+            shasum -a 256 "$asset" > "${asset}.sha256"
+          fi
+          cat "${asset}.sha256"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true
