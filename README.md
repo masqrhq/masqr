@@ -21,14 +21,41 @@
 
 ## Quick start
 
-```bash
-go build -o masqr .
+> [!IMPORTANT]
+> masqr bundles its PP-OCRv5 models and ONNX Runtime libraries (~125 MB across platforms) via **Git LFS**. You must install Git LFS and pull them *before* building. If you skip this, the `.ocr/*.onnx` and runtime-library files stay as ~130-byte LFS pointer stubs — `go build` still **succeeds without error**, but `go:embed` bakes the stubs into the binary instead of the real models. The result is a much smaller executable (~16 MB instead of ~52 MB) whose OCR silently fails at runtime.
 
+**1. Install Git LFS** (once per machine — the binary, not just `git lfs install`):
+
+```bash
+sudo apt-get install git-lfs   # Debian / Ubuntu / WSL
+brew install git-lfs           # macOS
+winget install GitHub.GitLFS   # Windows (or use the Git for Windows installer)
+```
+
+**2. Clone and pull the LFS objects:**
+
+```bash
+git lfs install                              # configure the LFS hooks (once)
+git clone https://github.com/masqrhq/masqr.git
+cd masqr
+git lfs pull                                 # fetch the real .ocr/ models + runtime libs
+```
+
+**3. Verify the models are real, not pointer stubs**, then build:
+
+```bash
+du -h .ocr/rec.onnx          # expect ~16M, NOT 130 bytes
+go build -o masqr .          # ~52 MB binary on a supported platform
+```
+
+```bash
 ./masqr claude                          # Claude Code (Anthropic)
 ./masqr gemini -p "summarize file.txt"  # Gemini CLI (Google)
 ./masqr codex                           # Codex CLI (OpenAI)
 ./masqr --block-on=high claude          # loosen: only block ≥ high
 ```
+
+Already cloned without LFS? Just run `git lfs install && git lfs pull` in the existing checkout and rebuild — no need to re-clone.
 
 Masqr starts an HTTP listener on a random local port, exports it via the right `*_BASE_URL` env var for the child process (auto-detected from the command name — see [Provider profiles](#provider-profiles)), and PTY-attaches the child so you interact with it normally. When the child exits, masqr shuts down cleanly.
 
