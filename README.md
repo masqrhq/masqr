@@ -24,12 +24,58 @@
 > [!IMPORTANT]
 > masqr bundles its PP-OCRv5 models and ONNX Runtime libraries (~125 MB across platforms) via **Git LFS**. You must install Git LFS and pull them *before* building. If you skip this, the `.ocr/*.onnx` and runtime-library files stay as ~130-byte LFS pointer stubs — `go build` still **succeeds without error**, but `go:embed` bakes the stubs into the binary instead of the real models. The result is a much smaller executable (~16 MB instead of ~52 MB) whose OCR silently fails at runtime.
 
-**1. Install Git LFS** (once per machine — the binary, not just `git lfs install`):
+**1. Install the Git LFS binary** (once per machine — this is separate from `git lfs install`, which only wires up the hooks and fails if the binary is missing):
+
+<details open>
+<summary><strong>Windows</strong></summary>
+
+```powershell
+winget install GitHub.GitLFS      # winget (Windows 10/11)
+choco install git-lfs             # or Chocolatey
+scoop install git-lfs             # or Scoop
+```
+
+Git for Windows already bundles Git LFS — if you installed Git via [git-scm.com](https://git-scm.com/download/win), leave the "Git LFS" component checked and you're done.
+</details>
+
+<details>
+<summary><strong>WSL</strong> (Ubuntu / Debian)</summary>
 
 ```bash
-sudo apt-get install git-lfs   # Debian / Ubuntu / WSL
-brew install git-lfs           # macOS
-winget install GitHub.GitLFS   # Windows (or use the Git for Windows installer)
+sudo apt-get update
+sudo apt-get install -y git-lfs
+```
+
+WSL uses its own Linux Git, so the Windows install above does **not** carry over — install it inside the distro. For non-Debian WSL distros, use the matching command from the Linux section.
+</details>
+
+<details>
+<summary><strong>Linux</strong></summary>
+
+```bash
+sudo apt-get install git-lfs        # Debian / Ubuntu
+sudo dnf install git-lfs            # Fedora / RHEL / CentOS Stream
+sudo pacman -S git-lfs             # Arch / Manjaro
+sudo zypper install git-lfs        # openSUSE
+sudo apk add git-lfs               # Alpine
+```
+
+If your distro's package is missing or too old, use the official [`packagecloud` script](https://github.com/git-lfs/git-lfs/blob/main/INSTALLING.md) or grab a binary from the [releases page](https://github.com/git-lfs/git-lfs/releases).
+</details>
+
+<details>
+<summary><strong>macOS</strong></summary>
+
+```bash
+brew install git-lfs               # Homebrew
+sudo port install git-lfs          # or MacPorts
+```
+</details>
+
+Verify it's on your `PATH`:
+
+```bash
+git lfs version                    # e.g. git-lfs/3.4.1
 ```
 
 **2. Clone and pull the LFS objects:**
