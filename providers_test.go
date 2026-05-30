@@ -190,7 +190,7 @@ func TestGeminiBlockEnvelopeShape(t *testing.T) {
 	u, _ := url.Parse(upstream.URL)
 
 	policy := Policy{Threshold: SevCritical, Provider: gemini}
-	h := newProxy(u, log.New(io.Discard, "", 0), policy)
+	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
 
 	body := strings.NewReader(`{"contents":[{"parts":[{"text":"key=AKIAIOSFODNN7EXAMPLE"}]}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-1.5-pro:generateContent", body)
@@ -226,6 +226,49 @@ func TestGeminiBlockEnvelopeShape(t *testing.T) {
 	}
 }
 
+// TestAntigravityBlockEnvelopeShape guards the agy fix: a blocked Antigravity
+// request must return the Google error envelope (not the Anthropic default,
+// which agy's Code Assist client can't parse — it rendered as a generic
+// "Agent execution terminated due to error"), at HTTP 400 so the message is
+// surfaced to the user.
+func TestAntigravityBlockEnvelopeShape(t *testing.T) {
+	agy, _ := LookupProvider("agy")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("upstream must not be hit")
+	}))
+	defer upstream.Close()
+	u, _ := url.Parse(upstream.URL)
+
+	policy := Policy{Threshold: SevCritical, Provider: agy}
+	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
+
+	body := strings.NewReader(`{"contents":[{"parts":[{"text":"key=AKIAIOSFODNN7EXAMPLE"}]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1internal:streamGenerateContent", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (so agy shows the message)", w.Code)
+	}
+	var ge googleBlockedError
+	if err := json.Unmarshal(w.Body.Bytes(), &ge); err != nil {
+		t.Fatalf("decode google envelope: %v\nraw: %s", err, w.Body.String())
+	}
+	if ge.Error.Status != "INVALID_ARGUMENT" {
+		t.Errorf("status = %q, want INVALID_ARGUMENT", ge.Error.Status)
+	}
+	if !strings.Contains(ge.Error.Message, "masqr blocked") {
+		t.Errorf("message missing masqr reason: %q", ge.Error.Message)
+	}
+	// Must NOT be the Anthropic shape agy can't read.
+	var be blockedError
+	if err := json.Unmarshal(w.Body.Bytes(), &be); err == nil && be.Type == "error" {
+		t.Errorf("body parsed as Anthropic envelope; agy needs the Google shape")
+	}
+}
+
 // TestAnthropicBlockEnvelopeUnchanged is the regression guard for the
 // historical envelope. Default provider (no profile / claude) keeps the
 // Anthropic shape — Claude Code's renderer depends on it.
@@ -238,7 +281,7 @@ func TestAnthropicBlockEnvelopeUnchanged(t *testing.T) {
 	u, _ := url.Parse(upstream.URL)
 
 	policy := Policy{Threshold: SevCritical, Provider: claude}
-	h := newProxy(u, log.New(io.Discard, "", 0), policy)
+	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
 
 	body := strings.NewReader(`{"prompt":"key=AKIAIOSFODNN7EXAMPLE"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
@@ -267,7 +310,7 @@ func TestOpenAIBlockEnvelopeShape(t *testing.T) {
 	u, _ := url.Parse(upstream.URL)
 
 	policy := Policy{Threshold: SevCritical, Provider: codex}
-	h := newProxy(u, log.New(io.Discard, "", 0), policy)
+	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
 
 	body := strings.NewReader(`{"messages":[{"role":"user","content":"AKIAIOSFODNN7EXAMPLE"}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
@@ -317,7 +360,7 @@ func TestGeminiOAuthPathRoutesToCodeAssist(t *testing.T) {
 	gemini.Routes = []Route{{PathPrefix: "/v1internal", Target: codeAssist.URL}}
 
 	policy := Policy{Threshold: SevCritical, Provider: gemini}
-	h := newProxy(publicURL, log.New(io.Discard, "", 0), policy)
+	h := newProxy(publicURL, log.New(io.Discard, "", 0), policy, nil)
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/v1internal:loadCodeAssist",
@@ -362,7 +405,7 @@ func TestGeminiAPIPathRoutesToPublicEndpoint(t *testing.T) {
 	gemini.Routes = []Route{{PathPrefix: "/v1internal", Target: codeAssist.URL}}
 
 	policy := Policy{Threshold: SevCritical, Provider: gemini}
-	h := newProxy(publicURL, log.New(io.Discard, "", 0), policy)
+	h := newProxy(publicURL, log.New(io.Discard, "", 0), policy, nil)
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/v1beta/models/gemini-1.5-pro:generateContent",
@@ -391,7 +434,7 @@ func TestGeminiURLKeyBlocksRequest(t *testing.T) {
 
 	var logbuf strings.Builder
 	policy := Policy{Threshold: SevLow, Provider: gemini}
-	h := newProxy(u, log.New(&logbuf, "", 0), policy)
+	h := newProxy(u, log.New(&logbuf, "", 0), policy, nil)
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/v1beta/models/gemini-1.5-pro:generateContent?key=AIzaSyAabcdefghijklmnopqrstuvwxyz123456",

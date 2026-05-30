@@ -147,6 +147,13 @@ func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Dura
 	defer log.SetOutput(os.Stderr)
 	logger := log.New(logFile, "", log.LstdFlags|log.Lmicroseconds)
 
+	// Providers with no base-URL override whose client ignores HTTPS_PROXY
+	// (Antigravity's `agy`) take the transparent-TLS interception path; every
+	// other provider uses the plaintext reverse proxy below.
+	if policy.Provider.Intercept {
+		return runIntercept(ctx, cliPath, cliArgs, grace, upstream, logger, policy, logPath)
+	}
+
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
@@ -155,7 +162,7 @@ func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Dura
 	printBanner(os.Stderr, endpoint, policy.Provider, logPath)
 
 	srv := &http.Server{
-		Handler:           newProxy(upstream, logger, policy),
+		Handler:           newProxy(upstream, logger, policy, nil),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -181,7 +188,7 @@ func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Dura
 		// `[OPTIONS]` slot every modern CLI uses, ahead of any subcommand
 		// or positional prompt the user typed.
 		mergedArgs := append(append([]string{}, extras...), cliArgs...)
-		err := runCLI(ctx, cliPath, mergedArgs, policy.Provider.EnvVars, endpoint)
+		err := runCLI(ctx, cliPath, mergedArgs, policy.Provider.EnvVars, endpoint, nil)
 		stop()
 		return err
 	})
@@ -206,12 +213,16 @@ func expandExtraArgs(args []string, endpoint string) []string {
 	return out
 }
 
-func runCLI(ctx context.Context, path string, args, envVars []string, endpoint string) error {
+func runCLI(ctx context.Context, path string, args, envVars []string, endpoint string, extraEnv []string) error {
 	cmd := exec.CommandContext(ctx, path, args...)
 	env := os.Environ()
 	for _, v := range envVars {
 		env = append(env, v+"="+endpoint)
 	}
+	// extraEnv carries literal KEY=VALUE pairs (intercept mode: SSL_CERT_FILE,
+	// LD_PRELOAD, GODEBUG, MASQR_REDIRECT_*). Appended last so they take
+	// precedence over any inherited value of the same key.
+	env = append(env, extraEnv...)
 	cmd.Env = env
 
 	if !term.IsTerminal(int(os.Stdin.Fd())) {

@@ -80,6 +80,19 @@ type Provider struct {
 	// Each entry may include the placeholder `{{endpoint}}`, which
 	// runCLI substitutes with the masqr listener URL right before exec.
 	ExtraArgs []string
+
+	// Intercept selects masqr's transparent-TLS-interception path instead of
+	// the default plaintext reverse proxy. It exists for CLIs that expose no
+	// base-URL override and whose API client ignores HTTPS_PROXY — Antigravity
+	// (`agy`) is the canonical case: it hardcodes
+	// daily-cloudcode-pa.googleapis.com and the only redirect lever it honors
+	// is TLS trust via SSL_CERT_FILE. When true, run() takes runIntercept()
+	// (see intercept.go): masqr terminates TLS on the target host with an
+	// on-the-fly CA the child trusts, redirects the name to the local listener
+	// (LD_PRELOAD getaddrinfo shim, or /etc/hosts fallback), and forwards to
+	// the pinned real upstream. Every other provider leaves this false and is
+	// unaffected.
+	Intercept bool
 }
 
 // Route binds a request-path prefix to an upstream URL. The first matching
@@ -124,6 +137,24 @@ var anthropicProfile = Provider{
 	Target:      "https://api.anthropic.com",
 	EnvVars:     []string{"ANTHROPIC_BASE_URL"},
 	AuthHeaders: []string{"x-api-key", "anthropic-api-key", "authorization"},
+}
+
+// antigravityProfile drives Google's Antigravity CLI (`agy`). Unlike the other
+// providers it has no base-URL override and its Code Assist client talks
+// straight to daily-cloudcode-pa.googleapis.com over a path
+// (`/v1internal:streamGenerateContent` etc.) identical to Gemini CLI's OAuth
+// surface — but it ignores GOOGLE_GEMINI_BASE_URL / CODE_ASSIST_ENDPOINT /
+// HTTPS_PROXY. `Intercept: true` routes it through masqr's transparent-TLS
+// path instead. The single Route mirrors the Target so request rewriting in
+// newProxy stays uniform with the reverse-proxy providers.
+var antigravityProfile = Provider{
+	Name:   "antigravity",
+	Target: "https://daily-cloudcode-pa.googleapis.com",
+	Routes: []Route{
+		{PathPrefix: "/v1internal", Target: "https://daily-cloudcode-pa.googleapis.com"},
+	},
+	AuthHeaders: []string{"authorization", "x-goog-api-key"},
+	Intercept:   true,
 }
 
 // openAIProfileFor builds the openai/codex profile at lookup time so it
@@ -207,6 +238,8 @@ var builtinProviders = map[string]Provider{
 	"gemini-cli":  geminiProfile,
 	"codex":       {Name: "openai"}, // placeholder, see openAIProfileFor
 	"openai":      {Name: "openai"}, // placeholder, see openAIProfileFor
+	"agy":         antigravityProfile,
+	"antigravity": antigravityProfile,
 }
 
 // LookupProvider returns the provider profile for the given child command,

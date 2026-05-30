@@ -47,7 +47,7 @@ func TestRedactRoundTripJSON(t *testing.T) {
 	u, _ := url.Parse(upstream.URL)
 
 	policy := Policy{Threshold: SevLow, Provider: gemini, OnFinding: OnFindingRedact}
-	h := newProxy(u, log.New(io.Discard, "", 0), policy)
+	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
 
 	// First request — fresh memo. Expect __EMAIL_1__ in upstream view,
 	// original in the response we get back.
@@ -106,7 +106,7 @@ func TestRedactDistinctValuesGetDistinctCounters(t *testing.T) {
 	defer upstream.Close()
 	u, _ := url.Parse(upstream.URL)
 	policy := Policy{Threshold: SevLow, Provider: gemini, OnFinding: OnFindingRedact}
-	h := newProxy(u, log.New(io.Discard, "", 0), policy)
+	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
 
 	for _, email := range []string{"a@example.com", "b@example.com"} {
 		// `/v1beta/...` deliberately misses the gemini profile's
@@ -136,7 +136,7 @@ func TestRedactFallsBackToBlockOnURLFinding(t *testing.T) {
 	defer upstream.Close()
 	u, _ := url.Parse(upstream.URL)
 	policy := Policy{Threshold: SevLow, Provider: gemini, OnFinding: OnFindingRedact}
-	h := newProxy(u, log.New(io.Discard, "", 0), policy)
+	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/v1beta/models/gemini-1.5-pro:generateContent?key=AIzaSyAabcdefghijklmnopqrstuvwxyz123456",

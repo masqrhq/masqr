@@ -176,20 +176,34 @@ func writeBlockResponse(w http.ResponseWriter, matches []Match, provider Provide
 		}
 	}
 	msg := fmt.Sprintf(
-		"masqr blocked the request: detected %s. To proceed: edit the prompt or raise --block-on.",
+		"masqr blocked this prompt: detected %s. To proceed, edit the prompt, or rerun masqr with --on-finding redact (mask the value) or --block-on=<higher severity> (allow it).",
 		strings.Join(ids, ", "),
 	)
 
 	status := http.StatusUnavailableForLegalReasons
+	if provider.Name == "antigravity" {
+		// agy's Code Assist client renders a standard Google API error with its
+		// message; a 400 INVALID_ARGUMENT surfaces cleanly, whereas the 451 the
+		// other providers use shows up as a generic "terminated due to error".
+		status = http.StatusBadRequest
+	}
 
 	var body any
 	switch provider.Name {
-	case "google-gemini", "google-vertex":
+	case "google-gemini", "google-vertex", "antigravity":
+		// agy (antigravity) hits the same Code Assist backend as the Gemini
+		// OAuth path, so it expects the Google error envelope — not the
+		// Anthropic-shaped default, which it can't parse (hence the opaque
+		// "Agent execution terminated due to error").
+		gstatus := "FAILED_PRECONDITION"
+		if provider.Name == "antigravity" {
+			gstatus = "INVALID_ARGUMENT"
+		}
 		body = googleBlockedError{
 			Error: googleBlockedDetail{
 				Code:    status,
 				Message: msg,
-				Status:  "FAILED_PRECONDITION",
+				Status:  gstatus,
 				Details: []googleBlockedDetailItem{{
 					Type:     "type.googleapis.com/masqr.BlockedRequest",
 					Findings: findings,

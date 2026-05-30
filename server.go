@@ -87,7 +87,11 @@ type parsedRoute struct {
 	url    *url.URL
 }
 
-func newProxy(upstream *url.URL, logger *log.Logger, policy Policy) http.Handler {
+// newProxy builds the scan/redact/block reverse-proxy handler. transport is
+// optional: the plaintext providers pass nil (http.DefaultTransport is used);
+// the transparent-intercept path passes a transport pinned to the real
+// upstream IP so forwarding can't loop back through a hostname redirect.
+func newProxy(upstream *url.URL, logger *log.Logger, policy Policy, transport http.RoundTripper) http.Handler {
 	memo := newFindingMemo()
 
 	// Pre-parse provider Routes. A bad URL is logged once at startup and
@@ -159,6 +163,9 @@ func newProxy(upstream *url.URL, logger *log.Logger, policy Policy) http.Handler
 			logger.Printf("[#%d] proxy error: %v", id, err)
 			http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
 		},
+	}
+	if transport != nil {
+		proxy.Transport = transport
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -38,7 +38,7 @@ func TestWebSocketUpgradeReturns501(t *testing.T) {
 	}))
 	defer upstream.Close()
 	u, _ := url.Parse(upstream.URL)
-	h := newProxy(u, log.New(io.Discard, "", 0), Policy{Threshold: SevCritical})
+	h := newProxy(u, log.New(io.Discard, "", 0), Policy{Threshold: SevCritical}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/responses", nil)
 	req.Header.Set("Connection", "Upgrade")
@@ -70,7 +70,7 @@ func TestRequestHeadersAreNotScanned(t *testing.T) {
 	}))
 	defer upstream.Close()
 	u, _ := url.Parse(upstream.URL)
-	h := newProxy(u, log.New(io.Discard, "", 0), Policy{Threshold: SevLow})
+	h := newProxy(u, log.New(io.Discard, "", 0), Policy{Threshold: SevLow}, nil)
 
 	body := strings.NewReader(`{"prompt":"hello"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
@@ -102,7 +102,7 @@ func TestPolicyBlockReturns451(t *testing.T) {
 	u, _ := url.Parse(upstream.URL)
 
 	policy := Policy{Threshold: SevCritical}
-	h := newProxy(u, log.New(io.Discard, "", 0), policy)
+	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
 
 	// AWS access key ID is `critical`/`secret` in defaultRules — should trip.
 	body := strings.NewReader(`{"prompt": "key=AKIAIOSFODNN7EXAMPLE"}`)
@@ -149,7 +149,7 @@ func TestPolicyThresholdFiltersBelowFloor(t *testing.T) {
 	u, _ := url.Parse(upstream.URL)
 
 	policy := Policy{Threshold: SevCritical}
-	h := newProxy(u, log.New(io.Discard, "", 0), policy)
+	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
 
 	// email-address rule is medium/pii — below the critical floor.
 	body := strings.NewReader(`{"prompt": "contact me at someone@example.com please"}`)
