@@ -253,6 +253,7 @@ func (s *Scanner) scanRecursive(body []byte, depth int) []Match {
 
 	if depth == 0 {
 		out = dropEmptyBase64Blobs(out)
+		out = suppressMachineTimestamps(body, out)
 	}
 	return dedupeMatches(out)
 }
