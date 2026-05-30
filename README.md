@@ -27,6 +27,20 @@
 **1. Install the Git LFS binary** (once per machine — this is separate from `git lfs install`, which only wires up the hooks and fails if the binary is missing):
 
 <details open>
+<summary><strong>Linux</strong></summary>
+
+```bash
+sudo apt-get install git-lfs        # Debian / Ubuntu
+sudo dnf install git-lfs            # Fedora / RHEL / CentOS Stream
+sudo pacman -S git-lfs             # Arch / Manjaro
+sudo zypper install git-lfs        # openSUSE
+sudo apk add git-lfs               # Alpine
+```
+
+If your distro's package is missing or too old, use the official [`packagecloud` script](https://github.com/git-lfs/git-lfs/blob/main/INSTALLING.md) or grab a binary from the [releases page](https://github.com/git-lfs/git-lfs/releases).
+</details>
+
+<details>
 <summary><strong>Windows</strong></summary>
 
 ```powershell
@@ -47,20 +61,6 @@ sudo apt-get install -y git-lfs
 ```
 
 WSL uses its own Linux Git, so the Windows install above does **not** carry over — install it inside the distro. For non-Debian WSL distros, use the matching command from the Linux section.
-</details>
-
-<details>
-<summary><strong>Linux</strong></summary>
-
-```bash
-sudo apt-get install git-lfs        # Debian / Ubuntu
-sudo dnf install git-lfs            # Fedora / RHEL / CentOS Stream
-sudo pacman -S git-lfs             # Arch / Manjaro
-sudo zypper install git-lfs        # openSUSE
-sudo apk add git-lfs               # Alpine
-```
-
-If your distro's package is missing or too old, use the official [`packagecloud` script](https://github.com/git-lfs/git-lfs/blob/main/INSTALLING.md) or grab a binary from the [releases page](https://github.com/git-lfs/git-lfs/releases).
 </details>
 
 <details>

@@ -17,7 +17,7 @@ TESTARGS ?= -race -count=1 -timeout 5m
 # Stamp main.version when set; release builds do this via -ldflags.
 VERSION ?= dev
 
-.PHONY: help all build demo test vet fmt fmt-check lint tidy clean
+.PHONY: help all build demo test vet fmt fmt-check lint tidy clean lfs-check lfs-pull
 
 help:	## Show this list of targets
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ \
@@ -25,11 +25,25 @@ help:	## Show this list of targets
 
 all: vet fmt-check test build  ## Run vet + fmt-check + test, then build the binary
 
-build:	## Compile ./masqr
+build: lfs-check	## Compile ./masqr
 	$(GO) build $(GOFLAGS) \
 	  -trimpath \
 	  -ldflags '$(LDFLAGS) -X main.version=$(VERSION)' \
 	  -o $(BIN) .
+
+lfs-check:	## Fail if the .ocr/ Git LFS objects are still pointer stubs
+	@stubs=$$(grep -rlIs '^version https://git-lfs.github.com/spec/' .ocr 2>/dev/null); \
+	if [ -n "$$stubs" ]; then \
+	  echo "Git LFS objects are still pointer stubs — not pulled:"; \
+	  echo "$$stubs" | sed 's/^/  /'; \
+	  echo "go:embed would bake these ~130-byte stubs into the binary and OCR"; \
+	  echo "fails silently at runtime. Run 'make lfs-pull' (or git lfs pull)."; \
+	  exit 1; \
+	fi
+
+lfs-pull:	## Install LFS hooks and fetch the real .ocr/ models + runtime libs
+	git lfs install
+	git lfs pull
 
 demo:	## Compile ./demo/demo (log-replay tool)
 	$(GO) build $(GOFLAGS) -o demo/demo ./demo
