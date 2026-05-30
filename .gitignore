@@ -29,6 +29,7 @@ coverage.txt
 .idea/
 .vscode/
 .claude/
+.antigravitycli/
 *.swp
 *~
 .DS_Store
