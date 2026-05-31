@@ -27,6 +27,20 @@ jobs:
         with:
           lfs: true
 
+      - name: Verify LFS payloads
+        shell: bash
+        run: |
+          # A stubbed .onnx (still an LFS pointer, ~130 bytes) would get baked
+          # into the binary by go:embed and OCR would fail silently at runtime.
+          # Catch it here so a broken artifact never reaches a release.
+          for f in .ocr/det.onnx .ocr/rec.onnx .ocr/cls.onnx; do
+            size=$(wc -c < "$f")
+            if [ "$size" -lt 100000 ]; then
+              echo "::error::$f is only $size bytes — LFS payload not pulled."
+              exit 1
+            fi
+          done
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:

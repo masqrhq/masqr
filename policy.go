@@ -131,9 +131,25 @@ type googleBlockedDetail struct {
 	Details []googleBlockedDetailItem `json:"details"`
 }
 
+// googleBlockedDetailItem is one entry in the google.rpc.Status details array.
+// masqr emits its own `masqr.BlockedRequest` (carrying the structured findings)
+// for every Google-family provider, and additionally — for agy — a
+// `google.rpc.ErrorInfo` whose metadata.uiMessage agy renders as a custom
+// message (see custom-error-message.md). The Reason/Metadata fields are
+// omitempty so they only appear on the ErrorInfo item.
 type googleBlockedDetailItem struct {
-	Type     string         `json:"@type"`
-	Findings []blockFinding `json:"findings"`
+	Type     string             `json:"@type"`
+	Reason   string             `json:"reason,omitempty"`
+	Metadata *errorInfoMetadata `json:"metadata,omitempty"`
+	Findings []blockFinding     `json:"findings,omitempty"`
+}
+
+// errorInfoMetadata is the metadata map of a google.rpc.ErrorInfo detail. agy's
+// showErrorMessageInUI (recovered from the v1.0.3 binary) reads uiMessage from
+// here and displays it verbatim instead of the generic "Agent execution
+// terminated due to error" banner.
+type errorInfoMetadata struct {
+	UIMessage string `json:"uiMessage,omitempty"`
 }
 
 // openAIBlockedError mirrors OpenAI's error response envelope so codex /
@@ -196,18 +212,30 @@ func writeBlockResponse(w http.ResponseWriter, matches []Match, provider Provide
 		// Anthropic-shaped default, which it can't parse (hence the opaque
 		// "Agent execution terminated due to error").
 		gstatus := "FAILED_PRECONDITION"
+		details := []googleBlockedDetailItem{{
+			Type:     "type.googleapis.com/masqr.BlockedRequest",
+			Findings: findings,
+		}}
 		if provider.Name == "antigravity" {
 			gstatus = "INVALID_ARGUMENT"
+			// agy doesn't surface error.message in its rich error UI; it renders
+			// details[].metadata.uiMessage from a google.rpc.ErrorInfo
+			// (showErrorMessageInUI). Prepend that item so the user sees masqr's
+			// block reason as a custom message instead of the generic banner.
+			// reason="CUSTOM" sidesteps agy's canned reason→message overrides
+			// (e.g. quota, verification). See custom-error-message.md.
+			details = append([]googleBlockedDetailItem{{
+				Type:     "type.googleapis.com/google.rpc.ErrorInfo",
+				Reason:   "CUSTOM",
+				Metadata: &errorInfoMetadata{UIMessage: msg},
+			}}, details...)
 		}
 		body = googleBlockedError{
 			Error: googleBlockedDetail{
 				Code:    status,
 				Message: msg,
 				Status:  gstatus,
-				Details: []googleBlockedDetailItem{{
-					Type:     "type.googleapis.com/masqr.BlockedRequest",
-					Findings: findings,
-				}},
+				Details: details,
 			},
 		}
 	case "openai":

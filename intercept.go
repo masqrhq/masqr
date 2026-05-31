@@ -70,14 +70,22 @@ func runIntercept(ctx context.Context, cliPath string, cliArgs []string, grace t
 	// Resolve the real upstream IP up front — before any /etc/hosts redirect
 	// could shadow it — and pin it in the proxy transport so forwarding never
 	// loops back into our own listener.
-	realIP, err := resolveIPv4(ctx, host)
+	realIP, err := resolveUpstreamIP(ctx, host)
 	if err != nil {
 		return fmt.Errorf("resolve upstream %s: %w", host, err)
 	}
 
-	cf, err := newCertFactory()
+	// After `masqr --macos-setup`, /etc/hosts + a pf rdr already route the host
+	// to an unprivileged :8443, so masqr listens there and needs no per-session
+	// sudo. Otherwise it binds :443 directly.
+	listenAddr := interceptListenAddr
+	if runtime.GOOS == "darwin" && macosSetupPresent() {
+		listenAddr = interceptUnprivAddr
+	}
+
+	cf, err := newInterceptCA(logger)
 	if err != nil {
-		return fmt.Errorf("build intercept CA: %w", err)
+		return fmt.Errorf("intercept CA: %w", err)
 	}
 
 	dir, err := os.MkdirTemp("", "masqr-intercept-")
@@ -86,9 +94,13 @@ func runIntercept(ctx context.Context, cliPath string, cliArgs []string, grace t
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
-	bundle, err := writeTrustBundle(cf.caPEM, dir)
-	if err != nil {
-		return fmt.Errorf("write trust bundle: %w", err)
+	// The SSL_CERT_FILE trust bundle is a Linux mechanism; macOS trusts the
+	// persistent CA via the Keychain instead, so skip it there.
+	var bundle string
+	if runtime.GOOS != "darwin" {
+		if bundle, err = writeTrustBundle(cf.caPEM, dir); err != nil {
+			return fmt.Errorf("write trust bundle: %w", err)
+		}
 	}
 
 	red, err := selectRedirector(host, bundle, dir, logger)
@@ -101,9 +113,13 @@ func runIntercept(ctx context.Context, cliPath string, cliArgs []string, grace t
 		}
 	}()
 
-	ln, err := net.Listen("tcp", interceptListenAddr)
+	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w (binding :443 may need 'sudo setcap cap_net_bind_service=+ep' on the masqr binary, or lower net.ipv4.ip_unprivileged_port_start)", interceptListenAddr, err)
+		hint := "binding :443 may need 'sudo setcap cap_net_bind_service=+ep' on the masqr binary, or lowering net.ipv4.ip_unprivileged_port_start"
+		if runtime.GOOS == "darwin" {
+			hint = "on macOS, either run `sudo masqr --macos-setup` once (then no sudo), or run `sudo masqr agy`"
+		}
+		return fmt.Errorf("listen %s: %w (%s)", listenAddr, err, hint)
 	}
 
 	srv := &http.Server{
@@ -228,7 +244,10 @@ func newCertFactory() (*certFactory, error) {
 func (f *certFactory) getCertificate(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	host := chi.ServerName
 	if host == "" {
-		return nil, errors.New("intercept: client sent no SNI")
+		// No SNI: the client reached us at an IP literal (the CLOUD_CODE_URL
+		// random-port path — Go omits SNI for IP addresses per RFC 6066). Serve
+		// a loopback leaf carrying an IP SAN instead of failing.
+		host = interceptRedirectIP
 	}
 	return f.leafFor(host)
 }
@@ -248,9 +267,15 @@ func (f *certFactory) leafFor(host string) (*tls.Certificate, error) {
 		Subject:      pkix.Name{CommonName: host},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(24 * time.Hour),
-		DNSNames:     []string{host},
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	// An IP host (CLOUD_CODE_URL=https://127.0.0.1:<port>) must go in the IP SAN
+	// — Go validates IP literals against IPAddresses, not DNSNames.
+	if ip := net.ParseIP(host); ip != nil {
+		tmpl.IPAddresses = []net.IP{ip}
+	} else {
+		tmpl.DNSNames = []string{host}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, f.caCert, &key.PublicKey, f.caKey)
 	if err != nil {
@@ -311,6 +336,21 @@ type Redirector interface {
 // LD_PRELOAD shim on Linux when a C compiler is available, otherwise the
 // /etc/hosts fallback. MASQR_INTERCEPT_REDIRECT=hosts|ldpreload forces one.
 func selectRedirector(host, bundle, dir string, logger *log.Logger) (Redirector, error) {
+	// macOS: no LD_PRELOAD (DYLD insertion is blocked for notarized binaries);
+	// redirect via /etc/hosts and rely on the Keychain-trusted persistent CA.
+	if runtime.GOOS == "darwin" {
+		if macosSetupPresent() {
+			logger.Printf("intercept: macOS persistent setup detected — listening on :8443, no per-session sudo")
+			return noopRedirector{}, nil
+		}
+		r := &hostsBind443{host: host}
+		if err := r.setup(); err != nil {
+			return nil, err
+		}
+		logger.Printf("intercept: redirecting %s via /etc/hosts (trust via Keychain)", host)
+		return &darwinRedirector{inner: r}, nil
+	}
+
 	force := os.Getenv("MASQR_INTERCEPT_REDIRECT")
 	tryLD := func() (Redirector, error) {
 		r := &ldPreloadResolver{host: host, bundle: bundle, dir: dir}

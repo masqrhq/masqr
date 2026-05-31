@@ -161,10 +161,8 @@ func usITIN(s string) bool {
 	default:
 		return false
 	}
-	if s[5:] == "0000" {
-		return false
-	}
-	return true
+	// Serial (last four) can't be all zeros.
+	return s[5:] != "0000"
 }
 
 // usNPI validates a 10-digit US National Provider Identifier using the

@@ -26,13 +26,22 @@ import (
 	"testing"
 )
 
-// TestAntigravityProfileIsIntercept locks in the agy-only scope guard: only the
-// agy/antigravity profile sets Intercept, and it targets the Code Assist host.
-func TestAntigravityProfileIsIntercept(t *testing.T) {
+// TestAntigravityProfileUsesCloudCodeURL locks in the plaintext-override path
+// for agy: the profile redirects via the CLOUD_CODE_URL env var (so run() takes
+// the ordinary reverse-proxy path, not the transparent-TLS intercept), and it
+// targets the Code Assist host. No provider sets Intercept anymore — agy's
+// CLOUD_CODE_URL override made the transparent-MITM path unnecessary.
+func TestAntigravityProfileUsesCloudCodeURL(t *testing.T) {
 	for _, cmd := range []string{"agy", "antigravity", "/usr/local/bin/agy", "AGY"} {
 		p, ok := LookupProvider(cmd)
-		if !ok || !p.Intercept {
-			t.Fatalf("LookupProvider(%q): want intercept profile, got ok=%v intercept=%v", cmd, ok, p.Intercept)
+		if !ok {
+			t.Fatalf("LookupProvider(%q): not found", cmd)
+		}
+		if p.Intercept {
+			t.Errorf("LookupProvider(%q).Intercept = true, want false (CLOUD_CODE_URL plaintext path)", cmd)
+		}
+		if len(p.EnvVars) != 1 || p.EnvVars[0] != "CLOUD_CODE_URL" {
+			t.Errorf("LookupProvider(%q).EnvVars = %v, want [CLOUD_CODE_URL]", cmd, p.EnvVars)
 		}
 		if p.Target != "https://daily-cloudcode-pa.googleapis.com" {
 			t.Errorf("LookupProvider(%q).Target = %q", cmd, p.Target)
@@ -41,9 +50,8 @@ func TestAntigravityProfileIsIntercept(t *testing.T) {
 			t.Errorf("LookupProvider(%q).Routes = %+v, want one /v1internal route", cmd, p.Routes)
 		}
 	}
-	// Every other provider must NOT be intercept — the transparent-MITM path
-	// is reachable for agy alone.
-	for _, cmd := range []string{"claude", "gemini", "codex", "openai", "somethingelse"} {
+	// No provider should request the transparent-TLS intercept path.
+	for _, cmd := range []string{"claude", "gemini", "codex", "openai", "agy", "somethingelse"} {
 		if p, _ := LookupProvider(cmd); p.Intercept {
 			t.Errorf("LookupProvider(%q) unexpectedly has Intercept=true", cmd)
 		}
@@ -139,6 +147,42 @@ func TestLDPreloadResolver(t *testing.T) {
 	}
 	if err := r.Teardown(); err != nil {
 		t.Errorf("Teardown: %v", err)
+	}
+}
+
+// TestPersistentCARoundTrip covers the macOS path's CA persistence: a generated
+// CA written to disk and reloaded must still sign verifiable leaves. Runs on any
+// OS (the file ops are platform-agnostic).
+func TestPersistentCARoundTrip(t *testing.T) {
+	cf, keyPEM, err := generatePersistentCA()
+	if err != nil {
+		t.Fatalf("generatePersistentCA: %v", err)
+	}
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "ca.pem")
+	keyPath := filepath.Join(dir, "ca-key.pem")
+	if err := os.WriteFile(certPath, cf.caPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadPersistentCA(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("loadPersistentCA: %v", err)
+	}
+	if loaded.caCert.Subject.CommonName != macCAName {
+		t.Errorf("loaded CA CN = %q, want %q", loaded.caCert.Subject.CommonName, macCAName)
+	}
+	leaf, err := loaded.leafFor("daily-cloudcode-pa.googleapis.com")
+	if err != nil {
+		t.Fatalf("leafFor on reloaded CA: %v", err)
+	}
+	crt, _ := x509.ParseCertificate(leaf.Certificate[0])
+	roots := x509.NewCertPool()
+	roots.AddCert(loaded.caCert)
+	if _, err := crt.Verify(x509.VerifyOptions{DNSName: "daily-cloudcode-pa.googleapis.com", Roots: roots}); err != nil {
+		t.Errorf("leaf from reloaded persistent CA does not verify: %v", err)
 	}
 }
 

@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -28,15 +27,20 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/creack/pty"
 	flag "github.com/spf13/pflag"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 )
+
+// version is the masqr release, stamped at build time via
+// -ldflags="-X main.version=<tag>" (see .github/workflows/release.yml). It stays
+// "dev" for local `go build`/`go install` so `masqr --version` is always answerable.
+var version = "dev"
 
 func main() {
 	addr := flag.StringP("addr", "a", "127.0.0.1:0", "HTTP listen address (use :0 for random port)")
@@ -47,6 +51,10 @@ func main() {
 	blockOn := flag.String("block-on", "low", "severity threshold for triggering: critical|high|medium|low (default low → act on any finding)")
 	onFinding := flag.String("on-finding", "block", "behavior on a triggering finding: block (return 451, never contact upstream) | redact (rewrite span with __LABEL_N__, restore in response)")
 	shutdownGrace := flag.Duration("shutdown-grace", 5*time.Second, "HTTP graceful shutdown timeout")
+	showVersion := flag.BoolP("version", "V", false, "print masqr version and exit")
+	tlsIntercept := flag.Bool("tls-intercept", false, "intercept the child over TLS on a random free loopback port via an https:// endpoint override (agy's CLOUD_CODE_URL) — no :443, sudo, LD_PRELOAD, or /etc/hosts")
+	doMacosSetup := flag.Bool("macos-setup", false, "macOS one-time setup (run with sudo): install persistent /etc/hosts + pf rdr :443->:8443 + LaunchDaemon so `masqr agy` runs without per-session sudo")
+	doMacosTeardown := flag.Bool("macos-teardown", false, "macOS: remove what --macos-setup installed (run with sudo)")
 
 	// Display friendly defaults in --help instead of the literal empty
 	// strings — the real defaults come from provider auto-detection.
@@ -70,6 +78,32 @@ func main() {
 			strings.Join(providerNames(), ", "))
 	}
 	flag.Parse()
+
+	// --version takes no child command; answer and exit before arg checks.
+	if *showVersion {
+		fmt.Printf("masqr %s %s/%s\n", version, runtime.GOOS, runtime.GOARCH)
+		return
+	}
+
+	// macOS one-time setup/teardown take no child command.
+	if *doMacosSetup || *doMacosTeardown {
+		if runtime.GOOS != "darwin" {
+			log.Fatal("--macos-setup/--macos-teardown are macOS-only")
+		}
+		if os.Geteuid() != 0 {
+			log.Fatal("run with sudo, e.g.: sudo masqr --macos-setup")
+		}
+		var err error
+		if *doMacosSetup {
+			err = macosSetup()
+		} else {
+			err = macosTeardown()
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	args := flag.Args()
 	if len(args) == 0 {
@@ -116,12 +150,12 @@ func main() {
 
 	policy := Policy{Threshold: threshold, Provider: provider, OnFinding: findingMode}
 
-	if err := run(args[0], args[1:], *addr, *logPath, *shutdownGrace, policy); err != nil {
+	if err := run(args[0], args[1:], *addr, *logPath, *shutdownGrace, policy, *tlsIntercept); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Duration, policy Policy) error {
+func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Duration, policy Policy, tlsIntercept bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -147,9 +181,17 @@ func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Dura
 	defer log.SetOutput(os.Stderr)
 	logger := log.New(logFile, "", log.LstdFlags|log.Lmicroseconds)
 
-	// Providers with no base-URL override whose client ignores HTTPS_PROXY
-	// (Antigravity's `agy`) take the transparent-TLS interception path; every
-	// other provider uses the plaintext reverse proxy below.
+	// --tls-intercept: terminate TLS on a random free loopback port and point the
+	// child at it via an https:// endpoint override (CLOUD_CODE_URL). Opt-in —
+	// the plaintext path below already intercepts agy; this is for when masqr
+	// needs the decrypted response stream too (e.g. SSE error injection).
+	if tlsIntercept {
+		return runInterceptEnv(ctx, cliPath, cliArgs, grace, upstream, logger, policy, logPath)
+	}
+
+	// Providers with no base-URL override whose client ignores HTTPS_PROXY take
+	// the transparent-TLS interception path; every other provider — agy included,
+	// via its plaintext CLOUD_CODE_URL override — uses the reverse proxy below.
 	if policy.Provider.Intercept {
 		return runIntercept(ctx, cliPath, cliArgs, grace, upstream, logger, policy, logPath)
 	}
@@ -223,6 +265,12 @@ func runCLI(ctx context.Context, path string, args, envVars []string, endpoint s
 	// LD_PRELOAD, GODEBUG, MASQR_REDIRECT_*). Appended last so they take
 	// precedence over any inherited value of the same key.
 	env = append(env, extraEnv...)
+
+	// macOS intercept needs `sudo masqr agy` to bind :443, but agy must run as
+	// the invoking user (its OAuth token + Keychain live there, not root's), so
+	// drop privileges for the child and point HOME/USER back at that user.
+	// Unix-only; a no-op on Windows (see runcli_{unix,windows}.go).
+	env = dropPrivilegesForChild(cmd, env)
 	cmd.Env = env
 
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
@@ -230,30 +278,7 @@ func runCLI(ctx context.Context, path string, args, envVars []string, endpoint s
 		return cmd.Run()
 	}
 
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		return fmt.Errorf("start %s: %w", path, err)
-	}
-	defer func() { _ = ptmx.Close() }()
-
-	resizeCh := make(chan os.Signal, 1)
-	signal.Notify(resizeCh, syscall.SIGWINCH)
-	defer signal.Stop(resizeCh)
-	go func() {
-		for range resizeCh {
-			_ = pty.InheritSize(os.Stdin, ptmx)
-		}
-	}()
-	resizeCh <- syscall.SIGWINCH
-
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		return fmt.Errorf("raw stdin: %w", err)
-	}
-	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
-
-	go func() { _, _ = io.Copy(ptmx, os.Stdin) }()
-	_, _ = io.Copy(os.Stdout, ptmx)
-
-	return cmd.Wait()
+	// Interactive path differs per OS: a PTY + SIGWINCH dance on Unix, plain
+	// inherited stdio on Windows (no PTY support there).
+	return runInteractive(cmd, path)
 }

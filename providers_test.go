@@ -262,6 +262,31 @@ func TestAntigravityBlockEnvelopeShape(t *testing.T) {
 	if !strings.Contains(ge.Error.Message, "masqr blocked") {
 		t.Errorf("message missing masqr reason: %q", ge.Error.Message)
 	}
+	// agy renders details[].metadata.uiMessage from a google.rpc.ErrorInfo via
+	// showErrorMessageInUI — so the block reason must be carried there, not only
+	// in error.message, or agy falls back to its generic banner.
+	var ui *errorInfoMetadata
+	for _, d := range ge.Error.Details {
+		if d.Type == "type.googleapis.com/google.rpc.ErrorInfo" {
+			ui = d.Metadata
+		}
+	}
+	if ui == nil {
+		t.Fatalf("no google.rpc.ErrorInfo detail; agy can't show a custom message. details: %+v", ge.Error.Details)
+	}
+	if !strings.Contains(ui.UIMessage, "masqr blocked") {
+		t.Errorf("ErrorInfo metadata.uiMessage missing masqr reason: %q", ui.UIMessage)
+	}
+	// The structured findings must still ride along under masqr's own @type.
+	var sawFindings bool
+	for _, d := range ge.Error.Details {
+		if d.Type == "type.googleapis.com/masqr.BlockedRequest" && len(d.Findings) > 0 {
+			sawFindings = true
+		}
+	}
+	if !sawFindings {
+		t.Errorf("masqr.BlockedRequest findings detail missing: %+v", ge.Error.Details)
+	}
 	// Must NOT be the Anthropic shape agy can't read.
 	var be blockedError
 	if err := json.Unmarshal(w.Body.Bytes(), &be); err == nil && be.Type == "error" {

@@ -139,22 +139,26 @@ var anthropicProfile = Provider{
 	AuthHeaders: []string{"x-api-key", "anthropic-api-key", "authorization"},
 }
 
-// antigravityProfile drives Google's Antigravity CLI (`agy`). Unlike the other
-// providers it has no base-URL override and its Code Assist client talks
-// straight to daily-cloudcode-pa.googleapis.com over a path
+// antigravityProfile drives Google's Antigravity CLI (`agy`). Its Code Assist
+// client talks to {daily-,}cloudcode-pa.googleapis.com over a path
 // (`/v1internal:streamGenerateContent` etc.) identical to Gemini CLI's OAuth
-// surface — but it ignores GOOGLE_GEMINI_BASE_URL / CODE_ASSIST_ENDPOINT /
-// HTTPS_PROXY. `Intercept: true` routes it through masqr's transparent-TLS
-// path instead. The single Route mirrors the Target so request rewriting in
-// newProxy stays uniform with the reverse-proxy providers.
+// surface, and ignores GOOGLE_GEMINI_BASE_URL / CODE_ASSIST_ENDPOINT /
+// HTTPS_PROXY. It does, however, honor the CLOUD_CODE_URL env var as a full
+// endpoint override (recovered from (*CLIAuthProvider).UpdateEndpointURL in the
+// v1.0.3 binary), and the scheme of that URL selects the transport: an http://
+// value makes the client speak *plaintext* HTTP. So masqr just exports
+// CLOUD_CODE_URL=http://<listener> and takes the same plaintext reverse-proxy
+// path as every other provider — no transparent-TLS intercept, forged CA,
+// LD_PRELOAD shim, /etc/hosts redirect, or :443/sudo needed. The single Route
+// mirrors the Target so request rewriting in newProxy stays uniform.
 var antigravityProfile = Provider{
 	Name:   "antigravity",
 	Target: "https://daily-cloudcode-pa.googleapis.com",
 	Routes: []Route{
 		{PathPrefix: "/v1internal", Target: "https://daily-cloudcode-pa.googleapis.com"},
 	},
+	EnvVars:     []string{"CLOUD_CODE_URL"},
 	AuthHeaders: []string{"authorization", "x-goog-api-key"},
-	Intercept:   true,
 }
 
 // openAIProfileFor builds the openai/codex profile at lookup time so it

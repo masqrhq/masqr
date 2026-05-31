@@ -19,6 +19,7 @@ package main
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"math"
 	"regexp"
 )
@@ -147,7 +148,7 @@ func looksLikeIdentifier(s string) bool {
 // fallback encodings in tryDecodeBase64 — the pattern above conservatively only
 // finds standard-alphabet candidates, which already covers Anthropic, Azure,
 // AWS, GCP, and most other cloud token formats.
-var base64CandidatePattern = regexp.MustCompile(`[A-Za-z0-9+/]{24,}={0,2}`)
+var base64CandidatePattern = regexp.MustCompile(fmt.Sprintf(`[A-Za-z0-9+/]{%d,}={0,2}`, minBase64Length))
 
 type base64Hit struct {
 	text   string
