@@ -127,7 +127,9 @@ func TestRedactDistinctValuesGetDistinctCounters(t *testing.T) {
 
 // TestRedactFallsBackToBlockOnURLFinding asserts that a URL-borne API
 // key blocks the request even in redact mode — a rewrite of the path
-// would still ship the key to the upstream.
+// would still ship the key to the upstream. The block is surfaced as a
+// model turn (carrying the X-Masqr-Blocked marker), and the upstream is
+// never contacted.
 func TestRedactFallsBackToBlockOnURLFinding(t *testing.T) {
 	gemini, _ := LookupProvider("gemini")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,8 +146,8 @@ func TestRedactFallsBackToBlockOnURLFinding(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusUnavailableForLegalReasons {
-		t.Fatalf("URL key should block; got status=%d body=%q", w.Code, w.Body.String())
+	if w.Header().Get("X-Masqr-Blocked") != "1" {
+		t.Fatalf("URL key should block; no X-Masqr-Blocked marker, status=%d body=%q", w.Code, w.Body.String())
 	}
 }
 

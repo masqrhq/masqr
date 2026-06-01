@@ -98,6 +98,31 @@ func forwardRewritten(w http.ResponseWriter, r *http.Request, proxy http.Handler
 	proxy.ServeHTTP(w, r)
 }
 
+// forwardMaskedRequest redacts matches and forwards the rewritten body upstream,
+// returning false (writing nothing) if any match can't be safely rewritten in
+// place. For a compressed request (codex's zstd) it redacts the decoded payload
+// — whose offsets the matches were computed against — and forwards it
+// uncompressed, dropping Content-Encoding so the upstream reads plain JSON. The
+// proxy's ModifyResponse restores originals into the reply stream.
+func forwardMaskedRequest(w http.ResponseWriter, r *http.Request, proxy http.Handler, rawBody, decodedBody []byte, matches []Match, shift int, enc string, memo *findingMemo) bool {
+	src := rawBody
+	stripEncoding := false
+	if enc != "" {
+		// Body was compressed; redact the decoded view and forward it plain.
+		src = decodedBody
+		stripEncoding = true
+	}
+	if !canRedactAll(matches, src, shift, "") {
+		return false
+	}
+	rewritten := redactSpans(src, matches, shift, memo)
+	if stripEncoding {
+		r.Header.Del("Content-Encoding")
+	}
+	forwardRewritten(w, r, proxy, rewritten)
+	return true
+}
+
 // newProxy builds the scan/redact/block reverse-proxy handler. transport is an
 // optional custom RoundTripper; callers pass nil to use http.DefaultTransport.
 func newProxy(upstream *url.URL, logger *log.Logger, policy Policy, transport http.RoundTripper) http.Handler {
@@ -208,22 +233,42 @@ func newProxy(upstream *url.URL, logger *log.Logger, policy Policy, transport ht
 		matches := logRequest(logger, id, r, body)
 		debugScanTrace(id, r, body, matches)
 
-		// agy streaming: a `mask` reply consenting to a prior block is honored
-		// even though that turn carries no finding of its own — so it must be
-		// checked before the has-findings gate. From here on the approved
-		// value(s) are auto-masked instead of blocked.
-		if isAgyStreamRequest(policy.Provider, r.URL.Path) && consent.hasPending() &&
-			isMaskAffirmation(extractUserRequest(latestUserText(body))) {
+		// decodedBody is the request payload the rule engine and the mask
+		// machinery reason over: identical to body for plaintext requests, but
+		// the decompressed form for a compressed one (codex sends zstd). Match
+		// offsets are relative to this view, so masking redacts against it.
+		decodedBody := body
+		enc := r.Header.Get("Content-Encoding")
+		if enc != "" && len(body) > 0 {
+			if d, derr := decode(body, enc); derr == nil {
+				decodedBody = d
+			}
+		}
+
+		// interactive marks a chat/generation request to a provider whose body
+		// format and response shape masqr understands — the providers that get
+		// the rich, model-turn block message plus interactive mask-and-continue
+		// (originally agy-only). Everything else falls back to writeBlockResponse.
+		interactive := interactiveMaskProvider(policy.Provider.Name) &&
+			isModelTurnPath(policy.Provider.Name, r.URL.Path)
+		streaming := wantsStreaming(policy.Provider.Name, r, decodedBody)
+		reqModel := jsonStringField(decodedBody, "model")
+
+		// A `mask` reply consenting to a prior block is honored even though that
+		// turn carries no finding of its own — so it's checked before the
+		// has-findings gate. From here on the approved value(s) are auto-masked
+		// instead of blocked.
+		if interactive && consent.hasPending() &&
+			isMaskAffirmation(extractUserRequest(latestUserTextFor(policy.Provider.Name, decodedBody))) {
 			approved := consent.approvePending()
 			logger.Printf("[#%d] MASK consent granted for %d value(s)", id, approved)
 			debugOutcome(id, "MASK-CONSENT-ACK", nil)
-			writeAgyStreamText(w, maskAckText(approved))
+			writeModelTurn(w, policy.Provider, maskAckText(approved), streaming, r.URL.Path, reqModel)
 			return
 		}
 
 		if blocking := policy.triggering(matches); len(blocking) > 0 {
 			shift := urlPrefixLen(r.URL)
-			enc := r.Header.Get("Content-Encoding")
 
 			// Classify: every triggering match is either redactable
 			// (in-body span with a stable Identity) or not (URL hits,
@@ -232,20 +277,18 @@ func newProxy(upstream *url.URL, logger *log.Logger, policy Policy, transport ht
 			// redactable, we have to block — silently dropping a URL-
 			// borne credential without rewriting the URL would still
 			// forward it to the upstream.
-			if policy.OnFinding == OnFindingRedact && canRedactAll(blocking, body, shift, enc) {
-				rewritten := redactSpans(body, blocking, shift, memo)
-				logger.Printf("[#%d] REDACTED %d finding(s); forwarding %d-byte body (was %d)",
-					id, len(blocking), len(rewritten), len(body))
-				debugOutcome(id, "REDACTED", rewritten)
-				forwardRewritten(w, r, proxy, rewritten)
+			if policy.OnFinding == OnFindingRedact &&
+				forwardMaskedRequest(w, r, proxy, body, decodedBody, blocking, shift, enc, memo) {
+				logger.Printf("[#%d] REDACTED %d finding(s); forwarding", id, len(blocking))
+				debugOutcome(id, "REDACTED", nil)
 				return
 			}
 
-			// agy streaming path: support interactive mask-and-continue.
-			// (Redact mode already returned above; reaching here means block,
-			// or redact with an un-redactable finding. The `mask` consent reply
-			// itself is handled before the has-findings gate above.)
-			if isAgyStreamRequest(policy.Provider, r.URL.Path) {
+			// Interactive providers support mask-and-continue. (Redact mode
+			// already returned above; reaching here means block, or redact with
+			// an un-redactable finding. The `mask` consent reply itself is
+			// handled before the has-findings gate above.)
+			if interactive {
 				// (b) split into already-consented vs still-blocking.
 				var consented, rest []Match
 				for _, m := range blocking {
@@ -257,11 +300,10 @@ func newProxy(upstream *url.URL, logger *log.Logger, policy Policy, transport ht
 				}
 
 				// (c) nothing left to block → mask the consented values, forward.
-				if len(rest) == 0 && canRedactAll(consented, body, shift, enc) {
-					rewritten := redactSpans(body, consented, shift, memo)
+				if len(rest) == 0 &&
+					forwardMaskedRequest(w, r, proxy, body, decodedBody, consented, shift, enc, memo) {
 					logger.Printf("[#%d] MASKED %d consented finding(s); forwarding", id, len(consented))
-					debugOutcome(id, "MASKED+FORWARDED (consented)", rewritten)
-					forwardRewritten(w, r, proxy, rewritten)
+					debugOutcome(id, "MASKED+FORWARDED (consented)", nil)
 					return
 				}
 
@@ -270,8 +312,9 @@ func newProxy(upstream *url.URL, logger *log.Logger, policy Policy, transport ht
 				consent.setPending(pending)
 				logger.Printf("[#%d] BLOCKED by policy (%d finding(s) >= %s); mask offered=%v",
 					id, len(blocking), policy.Threshold, len(pending) > 0)
-				debugOutcome(id, "BLOCKED (agy stream)", nil)
-				writeAgyStreamBlock(w, blocking, len(pending) > 0)
+				debugOutcome(id, "BLOCKED (model turn)", nil)
+				advice := blockAdvice(blocking, len(pending) > 0, providerCommand(policy.Provider.Name))
+				writeModelTurn(w, policy.Provider, advice, streaming, r.URL.Path, reqModel)
 				return
 			}
 

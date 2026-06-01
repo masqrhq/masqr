@@ -186,32 +186,29 @@ Positional args after the flags are passed straight to the child CLI — no `--`
 
 ## How blocking works
 
-When at least one match has severity ≥ `--block-on` (default `low` → any finding), masqr short-circuits before forwarding and returns:
+When at least one match has severity ≥ `--block-on` (default `low` → any finding), masqr short-circuits before forwarding — the upstream is never contacted. **On a chat/generation endpoint** the block comes back as a synthetic assistant *turn* in the CLI's own wire shape, so it renders inline like a normal model reply instead of a raw error:
 
-```http
-HTTP/1.1 451 Unavailable For Legal Reasons
-Content-Type: application/json
-X-Masqr-Blocked: 1
+```
+⛔ masqr blocked this prompt — nothing was sent; it never left your machine.
 
-{
-  "type": "error",
-  "error": {
-    "type": "masqr_blocked",
-    "message": "masqr blocked the request: detected aws-access-key-id. To proceed: edit the prompt or raise --block-on.",
-    "findings": [
-      {
-        "rule_id": "aws-access-key-id",
-        "category": "secret",
-        "severity": "critical",
-        "snippet": "AKIA••••••••••••MPLE",
-        "offset": 42
-      }
-    ]
-  }
-}
+What I caught:
+  • aws-access-key-id (secret · critical) — "AKIA••••••••••••MPLE"
+
+Heads-up: your CLI resends the whole conversation each turn, so this value is
+now in the chat history — masqr will keep blocking until it's masked or gone.
+
+How to continue:
+  1. Reply `mask` to mask the flagged value(s) for the rest of this chat, then resend…
+  2. Want that on every prompt automatically? Relaunch with `--on-finding=redact`…
+  3. Or clear the conversation (`/clear`) and leave the value out.
+  4. False positive? Raise the threshold: `masqr --block-on=high <cli>`…
 ```
 
-The envelope shape **adapts to the active provider** so each CLI surfaces the block reason through its own error renderer:
+Every blocked response carries `X-Masqr-Blocked: 1`.
+
+**Interactive mask-and-continue.** Reply `mask` to the offer above and masqr moves the flagged value(s) into a per-session consented set: from then on they're swapped for a `__LABEL_N__` placeholder the model never sees through (and restored in the reply you read), so the conversation keeps moving without the value ever reaching the upstream. The block explanation and the consent ack are delivered as a synthetic turn in each provider's protocol — Anthropic Messages SSE, OpenAI Responses SSE, OpenAI `chat.completion` SSE, and Gemini / Code Assist `generateContent` — with a single-JSON fallback for non-streaming requests. Supported for `claude`, `codex`, `gemini`, `agy`, and `vibe`.
+
+**Fallback error envelope.** For non-chat endpoints (token counts, onboarding, embeddings …) and unknown providers, masqr returns an HTTP `451 Unavailable For Legal Reasons` whose body shape **adapts to the active provider** so each CLI surfaces the reason through its own error renderer:
 
 | Provider | Body shape |
 |---|---|
@@ -219,9 +216,9 @@ The envelope shape **adapts to the active provider** so each CLI surfaces the bl
 | `google-gemini` | `{"error":{"code":451,"message":…,"status":"FAILED_PRECONDITION","details":[{"@type":"type.googleapis.com/masqr.BlockedRequest","findings":[…]}]}}` — `google.rpc.Status` shape parsed natively by `@google/genai` |
 | `openai` | `{"error":{"message":…,"type":"masqr_blocked","code":"masqr_blocked","findings":[…]}}` — OpenAI's error envelope |
 
-Upstream is never contacted; nothing leaks.
+Each finding carries `rule_id`, `category`, `severity`, a redacted `snippet`, and `offset`. Upstream is never contacted; nothing leaks.
 
-To loosen: `--block-on=high` (only high+critical block), `--block-on=critical` (only critical blocks). The `low` default is the safest — every finding gets a chance to be a human-in-the-loop decision. `--on-finding redact` rewrites each span with a `__LABEL_N__` placeholder and restores it in the response instead of blocking.
+To loosen: `--block-on=high` (only high+critical block), `--block-on=critical` (only critical blocks). The `low` default is the safest — every finding gets a chance to be a human-in-the-loop decision. `--on-finding redact` rewrites each span with a `__LABEL_N__` placeholder and restores it in the response instead of blocking, on every prompt automatically.
 
 ---
 
@@ -275,7 +272,9 @@ The proxy itself is `httputil.NewSingleHostReverseProxy` with custom `Director` 
 | `providers.go` | built-in profile registry (Anthropic/Gemini/OpenAI/Antigravity/Mistral), basename-based auto-detect, per-provider `Prepare` hook |
 | `vibe.go` | Mistral `vibe` redirect: builds a temp `VIBE_HOME` mirror with `config.toml`'s Mistral `api_base` rewritten to the listener (vibe has no base-URL env var) |
 | `server.go` | reverse proxy, request/response logging, URL key redaction, response decompression (gzip/deflate/brotli/zstd) |
-| `policy.go` | block-or-forward decision, HTTP 451 writer, per-provider error envelope (Anthropic / Google / OpenAI) |
+| `policy.go` | block-or-forward decision, block-advice text, fallback HTTP 451 writer + per-provider error envelope (Anthropic / Google / OpenAI) |
+| `interactive.go` | per-provider model-turn block responses (Anthropic / OpenAI Responses / OpenAI chat / Gemini SSE + JSON) and `mask`-reply parsing for the interactive consent flow |
+| `consent.go` | per-session mask-consent state: pending → consented identities, `mask` affirmation + user-text extraction |
 | `intercept.go` / `intercept_macos.go` | transparent TLS interception for `agy` (LD_PRELOAD/hosts redirect, persistent CA, macOS pf setup) |
 | `scanner.go` | orchestration: Aho-Corasick prefilter → per-rule regex → parallel external sources → base64 decode-rescan → dedupe |
 | `rules.go` | core built-in rule definitions (secrets, Swiss PII, generic) |

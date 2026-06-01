@@ -172,10 +172,11 @@ var antigravityProfile = Provider{
 // speak plaintext (like agy's CLOUD_CODE_URL), so masqr stays a plain reverse
 // proxy to api.mistral.ai — no TLS intercept. The API key rides in
 // Authorization: Bearer, so that header joins the redaction set. A blocked
-// request comes back as the default (Anthropic-shaped) 451 envelope, whose
-// "message" field vibe surfaces through its own error renderer
-// (ErrorResponse.primary_message); vibe's SDK raises on a non-2xx for both the
-// streaming and non-streaming paths, so no synthetic-SSE block is needed.
+// /v1/chat/completions request comes back (like every interactive provider) as
+// a synthetic 200 assistant turn carrying the block advice — an OpenAI-style
+// chat.completion(.chunk) — so vibe renders it inline and supports the
+// interactive `mask` reply (see interactive.go). Non-chat endpoints fall back to
+// the default Anthropic-shaped 451 envelope.
 var mistralProfile = Provider{
 	Name:        "mistral",
 	Target:      "https://api.mistral.ai",

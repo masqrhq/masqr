@@ -274,24 +274,6 @@ func writeBlockResponse(w http.ResponseWriter, matches []Match, provider Provide
 	_, _ = w.Write(buf)
 }
 
-// isAgyStreamRequest reports whether this is agy's streaming Code Assist call
-// (…/v1internal:streamGenerateContent). On that path agy silently swallows a
-// JSON error envelope, so the block has to be delivered as a synthetic SSE
-// "model" turn instead (see writeAgyStreamBlock).
-func isAgyStreamRequest(p Provider, path string) bool {
-	return p.Name == "antigravity" && strings.Contains(path, "streamGenerateContent")
-}
-
-// writeAgyStreamBlock answers a blocked agy streaming request with a 200
-// text/event-stream carrying one synthetic GenerateContentResponse (Code Assist
-// nests it under "response"). agy renders the text as a normal assistant reply —
-// so the user sees what tripped and how to keep working, rather than the
-// generic "Agent execution terminated due to error" the swallowed JSON 4xx
-// produces. The real block is still recorded in the session log.
-func writeAgyStreamBlock(w http.ResponseWriter, matches []Match, offerMask bool) {
-	writeAgyStreamText(w, blockAdvice(matches, offerMask))
-}
-
 // maskAckText confirms a `mask` consent reply.
 func maskAckText(n int) string {
 	switch {
@@ -304,54 +286,12 @@ func maskAckText(n int) string {
 	}
 }
 
-// writeAgyStreamText emits one synthetic Code Assist SSE event (a model turn
-// carrying text) at HTTP 200 — the response shape agy renders on its streaming
-// endpoint. Used for both the block explanation and the mask ack.
-func writeAgyStreamText(w http.ResponseWriter, text string) {
-	type part struct {
-		Text string `json:"text"`
-	}
-	type content struct {
-		Role  string `json:"role"`
-		Parts []part `json:"parts"`
-	}
-	type candidate struct {
-		Content      content `json:"content"`
-		FinishReason string  `json:"finishReason"`
-		Index        int     `json:"index"`
-	}
-	env := struct {
-		Response struct {
-			Candidates []candidate `json:"candidates"`
-		} `json:"response"`
-	}{}
-	env.Response.Candidates = []candidate{{
-		Content:      content{Role: "model", Parts: []part{{Text: text}}},
-		FinishReason: "STOP",
-	}}
-
-	buf, err := json.Marshal(env)
-	if err != nil {
-		buf = []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"masqr blocked this prompt; it never left your machine."}]},"finishReason":"STOP"}]}}`)
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Masqr-Blocked", "1")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("data: "))
-	_, _ = w.Write(buf)
-	_, _ = w.Write([]byte("\n\n"))
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
-}
-
 // blockAdvice renders the user-facing explanation for a blocked prompt: what
 // tripped (rule · category · severity, with the already-redacted snippet) and
 // concrete next steps for continuing the work — tailored to whether secrets,
-// PII, or both were involved.
-func blockAdvice(matches []Match, offerMask bool) string {
+// PII, or both were involved. cmd is the wrapped CLI's command name (agy /
+// claude / codex / gemini / vibe), substituted into the example invocations.
+func blockAdvice(matches []Match, offerMask bool, cmd string) string {
 	var b strings.Builder
 	// agy renders no markdown and no ANSI colour, but it DOES colour emoji —
 	// so the red marker is an inherently-red glyph (no red-shield emoji exists).
@@ -393,12 +333,12 @@ func blockAdvice(matches []Match, offerMask bool) string {
 		}
 		b.WriteByte('\n')
 		n++
-		fmt.Fprintf(&b, "  %d. Want that on every prompt automatically? Relaunch with `--on-finding=redact` (e.g. `masqr --on-finding=redact agy`) — same masking, no need to reply each time.\n", n)
+		fmt.Fprintf(&b, "  %d. Want that on every prompt automatically? Relaunch with `--on-finding=redact` (e.g. `masqr --on-finding=redact %s`) — same masking, no need to reply each time.\n", n, cmd)
 		n++
 	}
 	fmt.Fprintf(&b, "  %d. Or clear the conversation so the flagged turn drops out of history — type `/clear` (or `?` for your CLI's shortcuts) — then leave the value out.\n", n)
 	n++
-	fmt.Fprintf(&b, "  %d. False positive? Raise the threshold: `masqr --block-on=high agy` blocks only high/critical findings.\n", n)
+	fmt.Fprintf(&b, "  %d. False positive? Raise the threshold: `masqr --block-on=high %s` blocks only high/critical findings.\n", n, cmd)
 	switch {
 	case hasSecret && hasPII:
 		b.WriteString("\nA credential and personal data were involved: rotate the credential if it was real, keep secrets in environment variables or a secrets manager, and use a synthetic value for the personal data.")

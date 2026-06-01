@@ -187,11 +187,11 @@ func TestScanRequestCatchesURLKey(t *testing.T) {
 	}
 }
 
-// TestGeminiBlockEnvelopeShape verifies the policy emits Google's
-// rpc.Status envelope (and a 451) when the request is bound for Gemini —
-// not the Anthropic envelope. This is what lets the Gemini CLI render the
-// reason through its native error renderer.
-func TestGeminiBlockEnvelopeShape(t *testing.T) {
+// TestGeminiBlockModelTurn verifies a blocked Gemini :generateContent request
+// comes back as a renderable assistant turn — a 200 GenerateContentResponse
+// whose model part carries the masqr block advice — rather than an error
+// envelope, so the Gemini CLI shows it inline like a normal reply.
+func TestGeminiBlockModelTurn(t *testing.T) {
 	gemini, _ := LookupProvider("gemini")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("upstream must not be hit")
@@ -209,30 +209,31 @@ func TestGeminiBlockEnvelopeShape(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusUnavailableForLegalReasons {
-		t.Fatalf("status = %d, want 451", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (model turn)", w.Code)
 	}
-
-	var ge googleBlockedError
-	if err := json.Unmarshal(w.Body.Bytes(), &ge); err != nil {
-		t.Fatalf("decode google envelope: %v\nraw: %s", err, w.Body.String())
+	if w.Header().Get("X-Masqr-Blocked") != "1" {
+		t.Errorf("missing X-Masqr-Blocked header")
 	}
-	if ge.Error.Code == 0 || ge.Error.Status == "" {
-		t.Errorf("google envelope missing code/status: %+v", ge.Error)
+	// Public Gemini (/v1beta) is the flat GenerateContentResponse shape, not
+	// the Code Assist {"response":…} envelope agy/v1internal uses.
+	var env struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
 	}
-	if !strings.Contains(ge.Error.Message, "masqr") {
-		t.Errorf("google envelope message missing masqr tag: %q", ge.Error.Message)
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode gemini model turn: %v\nraw: %s", err, w.Body.String())
 	}
-	if len(ge.Error.Details) == 0 || len(ge.Error.Details[0].Findings) == 0 {
-		t.Errorf("google envelope details/findings empty: %+v", ge.Error.Details)
+	if len(env.Candidates) == 0 || len(env.Candidates[0].Content.Parts) == 0 {
+		t.Fatalf("no candidate text in model turn: %s", w.Body.String())
 	}
-
-	// And confirm it does NOT parse as the Anthropic envelope's
-	// distinctive top-level "type" field — important so the Gemini SDK
-	// never gets a shape it can't parse.
-	var be blockedError
-	if err := json.Unmarshal(w.Body.Bytes(), &be); err == nil && be.Type == "error" {
-		t.Errorf("body parsed as Anthropic envelope when it should be Google-shaped")
+	if !strings.Contains(env.Candidates[0].Content.Parts[0].Text, "masqr blocked") {
+		t.Errorf("model turn missing block advice: %q", env.Candidates[0].Content.Parts[0].Text)
 	}
 }
 
@@ -258,13 +259,11 @@ func TestAntigravityProfileUsesCloudCodeURL(t *testing.T) {
 	}
 }
 
-// TestAntigravityBlockEnvelopeShape guards the agy fix on the *non-streaming*
-// path (:generateContent): a blocked Antigravity request must return the Google
-// error envelope (not the Anthropic default, which agy's Code Assist client
-// can't parse — it rendered as a generic "Agent execution terminated due to
-// error"), at HTTP 400 so the message is surfaced. The streaming path is
-// covered separately by TestAntigravityStreamBlockReturnsSSE.
-func TestAntigravityBlockEnvelopeShape(t *testing.T) {
+// TestAntigravityBlockModelTurn guards agy on the *non-streaming* Code Assist
+// path (:generateContent): a blocked request returns a 200 model turn nested
+// under "response" (the Code Assist shape) carrying the advice, not an error
+// envelope. The streaming path is covered by TestAntigravityStreamBlockReturnsSSE.
+func TestAntigravityBlockModelTurn(t *testing.T) {
 	agy, _ := LookupProvider("agy")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("upstream must not be hit")
@@ -282,48 +281,32 @@ func TestAntigravityBlockEnvelopeShape(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (so agy shows the message)", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (model turn)", w.Code)
 	}
-	var ge googleBlockedError
-	if err := json.Unmarshal(w.Body.Bytes(), &ge); err != nil {
-		t.Fatalf("decode google envelope: %v\nraw: %s", err, w.Body.String())
+	if w.Header().Get("X-Masqr-Blocked") != "1" {
+		t.Errorf("missing X-Masqr-Blocked header")
 	}
-	if ge.Error.Status != "INVALID_ARGUMENT" {
-		t.Errorf("status = %q, want INVALID_ARGUMENT", ge.Error.Status)
+	// Code Assist (/v1internal) nests the GenerateContentResponse under "response".
+	var env struct {
+		Response struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		} `json:"response"`
 	}
-	if !strings.Contains(ge.Error.Message, "masqr blocked") {
-		t.Errorf("message missing masqr reason: %q", ge.Error.Message)
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode nested model turn: %v\nraw: %s", err, w.Body.String())
 	}
-	// agy renders details[].metadata.uiMessage from a google.rpc.ErrorInfo via
-	// showErrorMessageInUI — so the block reason must be carried there, not only
-	// in error.message, or agy falls back to its generic banner.
-	var ui *errorInfoMetadata
-	for _, d := range ge.Error.Details {
-		if d.Type == "type.googleapis.com/google.rpc.ErrorInfo" {
-			ui = d.Metadata
-		}
+	if len(env.Response.Candidates) == 0 || len(env.Response.Candidates[0].Content.Parts) == 0 {
+		t.Fatalf("no candidate text in nested model turn: %s", w.Body.String())
 	}
-	if ui == nil {
-		t.Fatalf("no google.rpc.ErrorInfo detail; agy can't show a custom message. details: %+v", ge.Error.Details)
-	}
-	if !strings.Contains(ui.UIMessage, "masqr blocked") {
-		t.Errorf("ErrorInfo metadata.uiMessage missing masqr reason: %q", ui.UIMessage)
-	}
-	// The structured findings must still ride along under masqr's own @type.
-	var sawFindings bool
-	for _, d := range ge.Error.Details {
-		if d.Type == "type.googleapis.com/masqr.BlockedRequest" && len(d.Findings) > 0 {
-			sawFindings = true
-		}
-	}
-	if !sawFindings {
-		t.Errorf("masqr.BlockedRequest findings detail missing: %+v", ge.Error.Details)
-	}
-	// Must NOT be the Anthropic shape agy can't read.
-	var be blockedError
-	if err := json.Unmarshal(w.Body.Bytes(), &be); err == nil && be.Type == "error" {
-		t.Errorf("body parsed as Anthropic envelope; agy needs the Google shape")
+	if !strings.Contains(env.Response.Candidates[0].Content.Parts[0].Text, "masqr blocked") {
+		t.Errorf("model turn missing block advice: %q", env.Response.Candidates[0].Content.Parts[0].Text)
 	}
 }
 
@@ -557,14 +540,10 @@ func TestPrepareVibeHomeMirrors(t *testing.T) {
 	}
 }
 
-// TestMistralBlockEnvelopeShape: a blocked vibe request comes back as the
-// default (Anthropic-shaped) 451. vibe's Mistral backend surfaces the block
-// reason via ErrorResponse.primary_message, which matches the `error.message`
-// field of this envelope — so the user sees what tripped. vibe's SDK raises on
-// the non-2xx for both stream and non-stream paths, so (unlike agy) no
-// synthetic-SSE handling is needed; this guards that the envelope still carries
-// a "message" key for the parser to pick up.
-func TestMistralBlockEnvelopeShape(t *testing.T) {
+// TestMistralBlockModelTurn: a blocked vibe /v1/chat/completions request comes
+// back as a 200 OpenAI-style chat.completion whose assistant message carries the
+// block advice, so vibe renders it inline as a normal reply.
+func TestMistralBlockModelTurn(t *testing.T) {
 	vibe, _ := LookupProvider("vibe")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("upstream must not be hit")
@@ -582,20 +561,30 @@ func TestMistralBlockEnvelopeShape(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusUnavailableForLegalReasons {
-		t.Fatalf("status = %d, want 451", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (model turn)", w.Code)
 	}
-	var be blockedError
-	if err := json.Unmarshal(w.Body.Bytes(), &be); err != nil {
-		t.Fatalf("decode block envelope: %v", err)
+	if w.Header().Get("X-Masqr-Blocked") != "1" {
+		t.Errorf("missing X-Masqr-Blocked header")
 	}
-	if be.Error.Type != "masqr_blocked" {
-		t.Errorf("envelope type = %q, want masqr_blocked", be.Error.Type)
+	var cc struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
 	}
-	// vibe's ErrorResponse.primary_message reads error.message; it must be
-	// present and carry the block reason or the user gets a blank error.
-	if !strings.Contains(be.Error.Message, "masqr blocked") {
-		t.Errorf("error.message missing block reason (vibe shows this): %q", be.Error.Message)
+	if err := json.Unmarshal(w.Body.Bytes(), &cc); err != nil {
+		t.Fatalf("decode chat.completion: %v\nraw: %s", err, w.Body.String())
+	}
+	if cc.Object != "chat.completion" || len(cc.Choices) == 0 {
+		t.Fatalf("not a chat.completion model turn: %s", w.Body.String())
+	}
+	if cc.Choices[0].Message.Role != "assistant" || !strings.Contains(cc.Choices[0].Message.Content, "masqr blocked") {
+		t.Errorf("model turn missing assistant advice: %+v", cc.Choices[0].Message)
 	}
 }
 
@@ -655,10 +644,10 @@ func TestAgyMaskConsentFlow(t *testing.T) {
 	}
 }
 
-// TestAnthropicBlockEnvelopeUnchanged is the regression guard for the
-// historical envelope. Default provider (no profile / claude) keeps the
-// Anthropic shape — Claude Code's renderer depends on it.
-func TestAnthropicBlockEnvelopeUnchanged(t *testing.T) {
+// TestAnthropicBlockModelTurn: a blocked claude /v1/messages request returns a
+// 200 Anthropic Messages object whose assistant text carries the block advice,
+// so Claude Code renders it inline rather than as an error.
+func TestAnthropicBlockModelTurn(t *testing.T) {
 	claude, _ := LookupProvider("claude")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("upstream must not be hit")
@@ -669,25 +658,42 @@ func TestAnthropicBlockEnvelopeUnchanged(t *testing.T) {
 	policy := Policy{Threshold: SevCritical, Provider: claude}
 	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
 
-	body := strings.NewReader(`{"prompt":"key=AKIAIOSFODNN7EXAMPLE"}`)
+	body := strings.NewReader(`{"messages":[{"role":"user","content":"key=AKIAIOSFODNN7EXAMPLE"}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
 
-	var be blockedError
-	if err := json.Unmarshal(w.Body.Bytes(), &be); err != nil {
-		t.Fatalf("decode anthropic envelope: %v", err)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (model turn)", w.Code)
 	}
-	if be.Type != "error" || be.Error.Type != "masqr_blocked" {
-		t.Errorf("anthropic envelope changed: %+v", be)
+	if w.Header().Get("X-Masqr-Blocked") != "1" {
+		t.Errorf("missing X-Masqr-Blocked header")
+	}
+	var msg struct {
+		Type    string `json:"type"`
+		Role    string `json:"role"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("decode anthropic message: %v\nraw: %s", err, w.Body.String())
+	}
+	if msg.Type != "message" || msg.Role != "assistant" || len(msg.Content) == 0 {
+		t.Fatalf("not an assistant message turn: %s", w.Body.String())
+	}
+	if !strings.Contains(msg.Content[0].Text, "masqr blocked") {
+		t.Errorf("model turn missing block advice: %q", msg.Content[0].Text)
 	}
 }
 
-// TestOpenAIBlockEnvelopeShape covers the codex/openai branch end-to-end so
-// adding a third provider doesn't accidentally fall through to Anthropic.
-func TestOpenAIBlockEnvelopeShape(t *testing.T) {
+// TestOpenAIBlockModelTurn: a blocked codex POST /responses comes back as a 200
+// Responses object whose output message carries the block advice, so codex
+// renders it inline rather than aborting on an error.
+func TestOpenAIBlockModelTurn(t *testing.T) {
 	codex, _ := LookupProvider("codex")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("upstream must not be hit")
@@ -698,22 +704,71 @@ func TestOpenAIBlockEnvelopeShape(t *testing.T) {
 	policy := Policy{Threshold: SevCritical, Provider: codex}
 	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
 
-	body := strings.NewReader(`{"messages":[{"role":"user","content":"AKIAIOSFODNN7EXAMPLE"}]}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	body := strings.NewReader(`{"input":[{"role":"user","content":[{"type":"input_text","text":"AKIAIOSFODNN7EXAMPLE"}]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
 
-	var oe openAIBlockedError
-	if err := json.Unmarshal(w.Body.Bytes(), &oe); err != nil {
-		t.Fatalf("decode openai envelope: %v", err)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (model turn)", w.Code)
 	}
-	if oe.Error.Type != "masqr_blocked" || oe.Error.Code != "masqr_blocked" {
-		t.Errorf("openai envelope changed: %+v", oe)
+	if w.Header().Get("X-Masqr-Blocked") != "1" {
+		t.Errorf("missing X-Masqr-Blocked header")
 	}
-	if len(oe.Error.Findings) == 0 {
-		t.Errorf("openai envelope missing findings")
+	var resp struct {
+		Object string `json:"object"`
+		Output []struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode responses object: %v\nraw: %s", err, w.Body.String())
+	}
+	if resp.Object != "response" || len(resp.Output) == 0 || len(resp.Output[0].Content) == 0 {
+		t.Fatalf("not a responses model turn: %s", w.Body.String())
+	}
+	if !strings.Contains(resp.Output[0].Content[0].Text, "masqr blocked") {
+		t.Errorf("model turn missing block advice: %q", resp.Output[0].Content[0].Text)
+	}
+}
+
+// TestGenericBlockEnvelopeFallback guards that an unknown provider (no model-turn
+// support) still gets the plain Anthropic-shaped 451 block envelope — the
+// fallback path writeBlockResponse serves for non-interactive providers and for
+// non-chat endpoints.
+func TestGenericBlockEnvelopeFallback(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("upstream must not be hit")
+	}))
+	defer upstream.Close()
+	u, _ := url.Parse(upstream.URL)
+
+	policy := Policy{Threshold: SevCritical, Provider: genericProvider}
+	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
+
+	body := strings.NewReader(`{"prompt":"key=AKIAIOSFODNN7EXAMPLE"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnavailableForLegalReasons {
+		t.Fatalf("status = %d, want 451", w.Code)
+	}
+	var be blockedError
+	if err := json.Unmarshal(w.Body.Bytes(), &be); err != nil {
+		t.Fatalf("decode block envelope: %v", err)
+	}
+	if be.Type != "error" || be.Error.Type != "masqr_blocked" {
+		t.Errorf("generic block envelope changed: %+v", be)
 	}
 }
 
@@ -830,8 +885,11 @@ func TestGeminiURLKeyBlocksRequest(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusUnavailableForLegalReasons {
-		t.Fatalf("URL-borne key should have been blocked, got %d", w.Code)
+	// A URL-borne key can't be masked in place (rewriting the path would still
+	// ship the key upstream), so it blocks — now surfaced as a model turn, with
+	// the X-Masqr-Blocked marker and no upstream hit.
+	if w.Header().Get("X-Masqr-Blocked") != "1" {
+		t.Fatalf("URL-borne key should have been blocked; no X-Masqr-Blocked marker, got %d", w.Code)
 	}
 	if strings.Contains(logbuf.String(), "AIzaSyAabcdefghijklmnopqrstuvwxyz123456") {
 		t.Errorf("log contained raw API key — redaction failed:\n%s", logbuf.String())

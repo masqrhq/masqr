@@ -23,12 +23,12 @@ import (
 )
 
 // maskConsent tracks, for one masqr session, which flagged values the user has
-// approved to auto-mask. On agy's streaming path a blocked turn offers "reply
-// `mask` to mask and continue"; when the user does, the pending findings move
-// into the consented set and are redacted on every later turn instead of
-// blocking — so the conversation continues without the value ever reaching the
-// model in the clear. One masqr process wraps one session, so process-level
-// state is the session.
+// approved to auto-mask. On any interactive provider's chat path a blocked turn
+// offers "reply `mask` to mask and continue"; when the user does, the pending
+// findings move into the consented set and are redacted on every later turn
+// instead of blocking — so the conversation continues without the value ever
+// reaching the model in the clear. One masqr process wraps one session, so
+// process-level state is the session.
 type maskConsent struct {
 	mu        sync.Mutex
 	pending   []string        // finding identities offered in the last block, awaiting `mask`
