@@ -34,7 +34,7 @@ coverage.txt
 *~
 .DS_Store
 
-# test-agent run artifacts (traces, logs, verdicts)
-testagent/results/
+# test-agent QA harness — kept local, not committed (corpus lives in corpus_test.go)
+testagent/
 *.debug.jsonl
 *.debug.log
