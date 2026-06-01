@@ -70,9 +70,14 @@ func presidioRules() []Rule {
 		{
 			// DE VAT ID — `DE` prefix followed by 9 digits. The keyword
 			// anchor is selective enough to keep the rule effectively free.
+			// Leading `\b` is omitted: agy wraps prompts as `<USER_REQUEST>\n…`
+			// with a literal backslash-n, so `n` and `D` are both word chars and
+			// `\b` would miss a VAT id at the start of the user line. deVATRefine
+			// rejects interior matches (e.g. CODE123456789) instead.
 			ID: "de-vat-id", Category: "pii-de", Severity: SevMedium,
 			Keywords: []string{"DE"},
-			Pattern:  mk(`\bDE\d{9}\b`),
+			Pattern:  mk(`DE\d{9}\b`),
+			Refine:   deVATRefine,
 		},
 
 		// ─── Finland ───────────────────────────────────────────────────
@@ -88,4 +93,21 @@ func presidioRules() []Rule {
 			Validate: fiPIC,
 		},
 	}
+}
+
+// deVATRefine rejects DE+9-digit matches embedded inside a longer alphanumeric
+// token (e.g. CODE123456789) while still allowing agy's literal `\n` prefix
+// before a VAT id at the start of the user line.
+func deVATRefine(body []byte, start, end int) (int, int, bool) {
+	if start > 0 {
+		prev := body[start-1]
+		if (prev >= 'A' && prev <= 'Z') || (prev >= 'a' && prev <= 'z') ||
+			(prev >= '0' && prev <= '9') || prev == '_' {
+			if prev == 'n' && start >= 2 && body[start-2] == '\\' {
+				return start, end, true
+			}
+			return 0, 0, false
+		}
+	}
+	return start, end, true
 }

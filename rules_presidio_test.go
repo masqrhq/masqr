@@ -93,6 +93,7 @@ func TestPresidioLetterRules(t *testing.T) {
 		{"uk-passport", "passport AB1234567 in scope", "uk-passport"},
 		// Germany
 		{"de-vat", "DE123456789 is our VAT id", "de-vat-id"},
+		{"de-vat-agy-wrap", `<USER_REQUEST>\nDE123456789 is our VAT id\n</USER_REQUEST>`, "de-vat-id"},
 		// India
 		{"in-pan", "PAN ABCPK1234E for KYC", "in-pan"},
 		{"in-passport", "passport L1234567 issued in Delhi", "in-passport"},
@@ -105,12 +106,30 @@ func TestPresidioLetterRules(t *testing.T) {
 		{"sg-uen", "Entity UEN 200512345A", "sg-uen"},
 		// Finland
 		{"fi-pic", "hetu 131052-308T", "fi-personal-id"},
+
+		// Germany (shape-only national IDs)
+		{"de-id-card", "Personalausweis C12345678 ausgestellt", "de-id-card"},
+		{"de-health-insurance", "Versichertennummer A123456789 ok", "de-health-insurance"},
+		{"de-social-security", "SV-Nummer 12345678A123 hinterlegt", "de-social-security"},
+		// India
+		{"in-voter-id", "EPIC ABC1234567 issued", "in-voter-id"},
+		{"in-gstin", "GSTIN 27ABCPK1234E1Z5 registered", "in-gstin"},
+		// Italy
+		{"it-fiscal-code", "codice fiscale RSSMRA85T10A562S valido", "it-fiscal-code"},
+		{"it-driver-license", "patente AB1234567C rilasciata", "it-driver-license"},
+		// Korea
+		{"kr-passport", "passport M12345678 issued in Seoul", "kr-passport"},
+		// UK
+		{"uk-driving-licence", "DVLA licence MORGA753112AB5CD on file", "uk-driving-licence"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			mustHit(t, s, c.body, c.want)
 		})
 	}
+	t.Run("de-vat-fp-code", func(t *testing.T) {
+		mustMiss(t, s, "SKU CODE123456789 is not a German VAT number", "de-vat-id")
+	})
 }
 
 // ESpassport "AAA123456" is also 3 letters + 6 digits and conflicts with
