@@ -33,3 +33,8 @@ coverage.txt
 *.swp
 *~
 .DS_Store
+
+# test-agent run artifacts (traces, logs, verdicts)
+testagent/results/
+*.debug.jsonl
+*.debug.log

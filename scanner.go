@@ -79,6 +79,19 @@ type Scanner struct {
 	sources     []ScanSource
 }
 
+// RuleCount is the number of built-in regex rules (for DEBUG coverage reporting).
+func (s *Scanner) RuleCount() int { return len(s.rules) }
+
+// SourceNames lists the active external scan sources (gitleaks, digit-ids, …)
+// for DEBUG coverage reporting.
+func (s *Scanner) SourceNames() []string {
+	names := make([]string, len(s.sources))
+	for i, src := range s.sources {
+		names[i] = src.Name()
+	}
+	return names
+}
+
 const maxScanBytes = 2 << 20 // 2 MiB cap
 
 var (

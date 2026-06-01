@@ -151,6 +151,15 @@ func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Dura
 	}
 	defer func() { _ = logFile.Close() }()
 
+	// DEBUG=1 (or DEBUG=/path) opens a second, verbose trace log an agent can
+	// read to verify scan coverage, what arrived, what was masked/blocked, and
+	// the exact prompt the remote model received.
+	closeDebug, err := setupDebugLog(logPath)
+	if err != nil {
+		return fmt.Errorf("open debug log: %w", err)
+	}
+	defer closeDebug()
+
 	// Redirect the default logger so internal Printf calls (scanner sources,
 	// OCR init) land in the per-session log file instead of stderr — otherwise
 	// they bleed onto the banner.
