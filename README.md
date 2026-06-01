@@ -61,10 +61,10 @@ Prefer to build it yourself? See [Build from source](docs/reference.md#build-fro
 ## Usage
 
 ```sh
+masqr agy                             # wrap Google Antigravity (transparent TLS)
 masqr claude                          # wrap Anthropic Claude Code
 masqr codex                           # wrap OpenAI Codex
 masqr gemini -p "summarize file.txt"  # wrap Google Gemini
-masqr agy                             # wrap Google Antigravity (transparent TLS)
 masqr vibe                            # wrap Mistral vibe CLI
 
 masqr --block-on=high claude          # only block high+critical findings
