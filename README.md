@@ -9,7 +9,7 @@
 
 > deep prompt inspection for LLM CLIs
 
-`masqr` is a transparent proxy that sits between an LLM CLI (claude, gemini, codex, agy) and the upstream API. Every request is parsed, scanned for secrets / PII / attachments / OCR'd image content, logged in full, and **blocked before it leaves your machine** if anything trips. The CLI sees a normal API error telling you what leaked — you fix the prompt and retry. No config, no account, no telemetry.
+`masqr` is a transparent proxy that sits between an LLM CLI (claude, gemini, codex, agy, vibe) and the upstream API. Every request is parsed, scanned for secrets / PII / attachments / OCR'd image content, logged in full, and **blocked before it leaves your machine** if anything trips. The CLI sees a normal API error telling you what leaked — you fix the prompt and retry. No config, no account, no telemetry.
 
 ```
  ▟█▙ ▟█▙   masqr  · deep prompt inspection [google-gemini]
@@ -21,15 +21,16 @@
 
 <p align="center"><sub><b>WORKS WITH</b></sub></p>
 <p align="center">
+  <a href="https://antigravity.google/"><img alt="Antigravity" src="https://img.shields.io/badge/Antigravity-4285F4?style=for-the-badge&logo=google&logoColor=white"></a>
   <a href="https://www.anthropic.com/claude-code"><img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-D97757?style=for-the-badge&logo=anthropic&logoColor=white"></a>
   <a href="https://openai.com/codex/"><img alt="Codex" src="https://img.shields.io/badge/Codex-000000?style=for-the-badge&logoColor=white"></a>
   <a href="https://ai.google.dev/gemini-api/docs"><img alt="Gemini" src="https://img.shields.io/badge/Gemini-1C69FF?style=for-the-badge&logo=googlegemini&logoColor=white"></a>
-  <a href="https://antigravity.google/"><img alt="Antigravity" src="https://img.shields.io/badge/Antigravity-4285F4?style=for-the-badge&logo=google&logoColor=white"></a>
+  <a href="https://github.com/mistralai/mistral-vibe"><img alt="Mistral Vibe" src="https://img.shields.io/badge/Mistral_Vibe-FA520F?style=for-the-badge&logo=mistralai&logoColor=white"></a>
 </p>
 
 ## Features at a glance
 
-- **Wraps the CLI you already use** — `masqr claude`, `masqr codex`, `masqr gemini`, `masqr agy`. The provider (upstream, env vars, auth redaction) is auto-detected from the command name; no flags needed.
+- **Wraps the CLI you already use** — `masqr claude`, `masqr codex`, `masqr gemini`, `masqr agy`, `masqr vibe`. The provider (upstream, env vars, auth redaction) is auto-detected from the command name; no flags needed.
 - **Catches secrets before they ship** — 40+ hand-tuned rules (AWS/GCP/Azure/Anthropic/OpenAI/Stripe/Slack/GitHub/GitLab tokens, JWTs, PEM keys) **plus the full gitleaks v8 ruleset**, all graded `critical · high · medium · low`.
 - **PII for 16 jurisdictions** — credit cards, IBANs, and country-tagged national IDs (US SSN/NPI, UK NHS, DE Steuer-ID, IN Aadhaar, …), each checksum-validated.
 - **Sees through obfuscation** — high-entropy base64 is decoded and re-scanned; JSON-escape artifacts are normalized.
@@ -64,6 +65,7 @@ masqr claude                          # wrap Anthropic Claude Code
 masqr codex                           # wrap OpenAI Codex
 masqr gemini -p "summarize file.txt"  # wrap Google Gemini
 masqr agy                             # wrap Google Antigravity (transparent TLS)
+masqr vibe                            # wrap Mistral vibe CLI
 
 masqr --block-on=high claude          # only block high+critical findings
 masqr --on-finding redact claude      # redact spans instead of blocking

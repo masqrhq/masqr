@@ -85,6 +85,7 @@ go build -o masqr .          # ~52 MB binary on a supported platform
 ./masqr claude                          # Claude Code (Anthropic)
 ./masqr gemini -p "summarize file.txt"  # Gemini CLI (Google)
 ./masqr codex                           # Codex CLI (OpenAI)
+./masqr vibe                            # vibe CLI (Mistral)
 ./masqr --block-on=high claude          # loosen: only block ≥ high
 ```
 
@@ -104,11 +105,16 @@ Masqr auto-detects the provider from the child command's basename and applies a 
 | `gemini`, `gemini-cli` | `google-gemini` | `https://generativelanguage.googleapis.com` <br/>`/v1internal*` → `https://cloudcode-pa.googleapis.com` | `GOOGLE_GEMINI_BASE_URL`, `CODE_ASSIST_ENDPOINT` | `x-goog-api-key`, `authorization` | `key`, `api_key`, `apikey`, `access_token` |
 | `codex`, `openai` | `openai` | `https://api.openai.com` | `OPENAI_BASE_URL` | `authorization`, `openai-organization`, `openai-project` | — |
 | `agy`, `antigravity` | `antigravity` | `https://daily-cloudcode-pa.googleapis.com` <br/>(transparent TLS interception — see below) | _none_ (no base-URL override exists) | `authorization`, `x-goog-api-key` | — |
+| `vibe`, `mistral`, `mistral-vibe` | `mistral` | `https://api.mistral.ai` | _none_ — redirected via a rewritten `config.toml` under a temp `VIBE_HOME` (see below) | `authorization` | — |
 | anything else | `generic` | from `--target` | from `--env` (default `ANTHROPIC_BASE_URL`) | universal set | universal set |
 
 **Gemini has two network paths.** The `@google/genai` SDK (API-key mode, set via `GEMINI_API_KEY`) talks to `generativelanguage.googleapis.com` and honours `GOOGLE_GEMINI_BASE_URL`. The OAuth `CodeAssistServer` path (free tier "Signed in with Google /auth", Code Assist for individuals, Google One AI Pro) talks to `cloudcode-pa.googleapis.com/v1internal…` and honours **only** `CODE_ASSIST_ENDPOINT`. The `gemini` profile exports both env vars to a single masqr listener and routes per-request based on URL path, so both auth modes are intercepted off one `masqr gemini` invocation — no special configuration needed.
 
 For Gemini specifically, masqr also **scans the request URL alongside the body**, so a key smuggled into `?key=AIza…` is flagged and blocked just like one in the prompt — and the log line redacts it before it ever hits disk.
+
+**Mistral (`vibe`) is redirected through its config file, not an env var.** vibe is the one supported CLI with **no base-URL environment override**: its upstream lives in the `api_base` field of a `[[providers]]` entry in `config.toml`, and that list isn't addressable from the environment — `VibeConfig` sets no `env_nested_delimiter` and `providers` is a list, so a `VIBE_PROVIDERS__MISTRAL__API_BASE` is silently dropped (`extra="ignore"`). The only lever is the config file. So `masqr vibe` builds a **throwaway `VIBE_HOME`**: it makes a temp dir, symlinks every entry of the real `~/.vibe` (the `.env` carrying `MISTRAL_API_KEY`, `trusted_folders.toml`, history, logs — so auth and trust survive untouched) **except** `config.toml`, which it copies with the Mistral chat provider's `api_base` rewritten to `http://<listener>/v1`, then exports `VIBE_HOME=<tempdir>` and removes it on exit. The real `~/.vibe` is never modified. The trailing `/v1` is required: vibe derives the Mistral SDK `server_url` by stripping a `/v<N>` segment (`get_server_url_from_api_base`) and rejects a value without one as `Invalid API base URL`; an `http://` value makes the SDK speak plaintext (like agy's `CLOUD_CODE_URL`), so this stays the ordinary plaintext reverse-proxy path — no TLS interception. Only the top-level `[[providers]]` Mistral entry with the `mistral` backend is rewritten — the separate `transcribe_providers` / `tts_providers` arrays (voice, `wss://` and a non-`/v1` host) are left alone. A blocked request returns the default 451 envelope, whose `error.message` vibe surfaces through its own error renderer (`ErrorResponse.primary_message`); vibe's SDK raises on the non-2xx for both streaming and non-streaming calls, so no synthetic-SSE block is needed.
+
+> vibe injects a large project-context preamble (file tree, git status) into every prompt, so the default `--block-on=low` can trip on a benign value in that context (e.g. an `email-address` in a path or commit). If a normal session blocks, use `--on-finding redact` or `--block-on=high` — the 451 message vibe prints names the rule and says exactly this.
 
 **Antigravity (`agy`) uses transparent TLS interception, not a base-URL override.** Google's Antigravity CLI has no `*_BASE_URL` knob, hardcodes `daily-cloudcode-pa.googleapis.com` by build channel, and its Code Assist client ignores `HTTPS_PROXY` — so masqr can't redirect it the way it does the other CLIs. Instead `masqr agy` runs a **transparent TLS proxy**: it stands up a local listener on `127.0.0.1:443`, generates a short-lived CA that `agy` trusts via `SSL_CERT_FILE` (system roots **+** the masqr CA, so `agy`'s other TLS calls still validate), redirects the hostname to the listener, and forwards to the real upstream — running the same scan/redact/block engine over the decrypted `/v1internal:*` traffic (including `streamGenerateContent` prompts).
 
@@ -170,7 +176,7 @@ flags:
   -t, --target string           upstream API                     (provider-profile default; overrides profile)
   -V, --version                 print masqr version and exit
 
-built-in providers: anthropic, google-gemini, openai
+built-in providers: anthropic, antigravity, google-gemini, mistral, openai
   detected automatically from the child command name.
 ```
 
@@ -266,7 +272,8 @@ The proxy itself is `httputil.NewSingleHostReverseProxy` with custom `Director` 
 |---|---|
 | `main.go` | flag parsing, provider auto-detection, signal handling, errgroup lifecycle |
 | `runcli_unix.go` / `runcli_windows.go` | child execution: PTY + SIGWINCH (Unix) / inherited stdio (Windows) |
-| `providers.go` | built-in profile registry (Anthropic/Gemini/OpenAI), basename-based auto-detect |
+| `providers.go` | built-in profile registry (Anthropic/Gemini/OpenAI/Antigravity/Mistral), basename-based auto-detect, per-provider `Prepare` hook |
+| `vibe.go` | Mistral `vibe` redirect: builds a temp `VIBE_HOME` mirror with `config.toml`'s Mistral `api_base` rewritten to the listener (vibe has no base-URL env var) |
 | `server.go` | reverse proxy, request/response logging, URL key redaction, response decompression (gzip/deflate/brotli/zstd) |
 | `policy.go` | block-or-forward decision, HTTP 451 writer, per-provider error envelope (Anthropic / Google / OpenAI) |
 | `intercept.go` / `intercept_macos.go` | transparent TLS interception for `agy` (LD_PRELOAD/hosts redirect, persistent CA, macOS pf setup) |
@@ -293,6 +300,7 @@ The proxy itself is `httputil.NewSingleHostReverseProxy` with custom `Director` 
 | `ANTHROPIC_BASE_URL` / `GOOGLE_GEMINI_BASE_URL` / `OPENAI_BASE_URL` | the provider profile picks the right one based on the child command name; override with `-e VAR` for unrecognised CLIs |
 | `MASQR_KEYWORDS` | path to a `<keyword>|<TYPE>` wordlist (overridden by `-k`) |
 | `MASQR_INTERCEPT_REDIRECT` | force the `agy` hostname-redirect path: `ldpreload` or `hosts` |
+| `VIBE_HOME` | read to locate vibe's real config dir (default `~/.vibe`); `masqr vibe` then re-exports it pointing at a temp mirror with a rewritten `config.toml` |
 | `MASQR_OCR=1` | enables the PaddleOCR source (runtime + models are embedded in the binary; no extra files required) |
 | `MASQR_ONNX_LIB` | override path to `libonnxruntime.so` — by default the bundled runtime is extracted to a temp file |
 | `MASQR_OCR_DET` | override path to a custom PaddleOCR detection ONNX model |
