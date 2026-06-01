@@ -206,6 +206,46 @@ func TestValidatorRejection(t *testing.T) {
 	}
 }
 
+// TestMiscBuiltinRules covers built-in rules that have no corpus seed of
+// their own (the seeds with similar names exercise sibling rules or the
+// gitleaks source instead): the underscore-form AWS secret, OpenAI project
+// keys, Slack bot/user tokens, GCP OAuth client IDs and service-account
+// key JSON, the 82-char fine-grained GitHub PAT, and the two Swiss PII
+// rules (UID with Mod-11 checksum, PostFinance account).
+func TestMiscBuiltinRules(t *testing.T) {
+	s := NewScanner(defaultRules())
+	// 82-char [A-Za-z0-9_] suffix — the fine-grained PAT's exact length.
+	const ghPat = "github_pat_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_abcdefghijklmnopqrs"
+	cases := []struct {
+		name, body, want string
+	}{
+		{"aws-secret", "config aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY end", "aws-secret-access-key"},
+		{"stripe", "charge with sk_live_4eC39HqLyjWDarjtT1zdp7dc now", "stripe-live-key"},
+		{"openai", "key sk-proj-abcdefghijklmnopqrstuvwxyz0123456789 in env", "openai-api-key"},
+		{"slack-token", "slack xoxb-123456789012-123456789012-abcdefghijklmnopqrstuvwx leaked", "slack-bot-or-user-token"},
+		{"gcp-oauth", "client 123456789012-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com here", "gcp-oauth-client-id"},
+		{"gcp-sa-key", `creds {"type": "service_account", "project_id": "x"}`, "gcp-service-account-key"},
+		{"github-fg", "tok " + ghPat + " set", "github-fine-grained-pat"},
+		{"ch-uid", "company UID CHE-105.962.533 registered", "ch-uid"},
+		{"ch-postfinance", "PostFinance account 80-2-2 please", "ch-postfinance-account"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hit := false
+			ms := s.Scan([]byte(c.body))
+			for _, m := range ms {
+				if m.RuleID == c.want {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				t.Errorf("expected %s to match in %q; got rules=%v", c.want, c.body, ruleIDs(ms))
+			}
+		})
+	}
+}
+
 // TestAzureConnStringRules covers the five Azure connection-string / key
 // rules in defaultRules(). The AccountKey value is the well-known Azurite
 // (devstore) development key — 88 base64 chars, matching both the
