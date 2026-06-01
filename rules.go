@@ -277,14 +277,18 @@ func defaultRules() []Rule {
 		},
 
 		// ─── Private IPs (always-on, no useful anchor) ───────────────────
+		// Loopback (127.0.0.0/8, ::1) and "localhost" are intentionally NOT
+		// matched: they point at the local machine, carry no information about
+		// an internal network, and show up constantly in tool output, configs,
+		// and docs (masqr's own listener is http://127.0.0.1:<port>).
 		{
 			ID: "private-ipv4", Category: "internal-ip", Severity: SevLow,
-			Pattern: mk(`\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b`),
+			Pattern: mk(`\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b`),
 		},
 		{
 			ID: "private-ipv6", Category: "internal-ip", Severity: SevLow,
-			Keywords: []string{"fc", "fd", "fe80", "::1"},
-			Pattern:  mk(`\b(?:fc[0-9a-f]{2}:|fd[0-9a-f]{2}:|fe80:|::1\b)[0-9a-f:]*`),
+			Keywords: []string{"fc", "fd", "fe80"},
+			Pattern:  mk(`\b(?:fc[0-9a-f]{2}:|fd[0-9a-f]{2}:|fe80:)[0-9a-f:]*`),
 		},
 	}
 	return append(rules, presidioRules()...)
