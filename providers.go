@@ -80,19 +80,6 @@ type Provider struct {
 	// Each entry may include the placeholder `{{endpoint}}`, which
 	// runCLI substitutes with the masqr listener URL right before exec.
 	ExtraArgs []string
-
-	// Intercept selects masqr's transparent-TLS-interception path instead of
-	// the default plaintext reverse proxy. It exists for CLIs that expose no
-	// base-URL override and whose API client ignores HTTPS_PROXY — Antigravity
-	// (`agy`) is the canonical case: it hardcodes
-	// daily-cloudcode-pa.googleapis.com and the only redirect lever it honors
-	// is TLS trust via SSL_CERT_FILE. When true, run() takes runIntercept()
-	// (see intercept.go): masqr terminates TLS on the target host with an
-	// on-the-fly CA the child trusts, redirects the name to the local listener
-	// (LD_PRELOAD getaddrinfo shim, or /etc/hosts fallback), and forwards to
-	// the pinned real upstream. Every other provider leaves this false and is
-	// unaffected.
-	Intercept bool
 }
 
 // Route binds a request-path prefix to an upstream URL. The first matching

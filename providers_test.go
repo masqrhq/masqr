@@ -226,6 +226,28 @@ func TestGeminiBlockEnvelopeShape(t *testing.T) {
 	}
 }
 
+// TestAntigravityProfileUsesCloudCodeURL locks in the plaintext-override path
+// for agy: the profile redirects via the CLOUD_CODE_URL env var (the ordinary
+// reverse-proxy path) and targets the Code Assist host. masqr is plaintext-only
+// — there is no TLS-intercept path anymore.
+func TestAntigravityProfileUsesCloudCodeURL(t *testing.T) {
+	for _, cmd := range []string{"agy", "antigravity", "/usr/local/bin/agy", "AGY"} {
+		p, ok := LookupProvider(cmd)
+		if !ok {
+			t.Fatalf("LookupProvider(%q): not found", cmd)
+		}
+		if len(p.EnvVars) != 1 || p.EnvVars[0] != "CLOUD_CODE_URL" {
+			t.Errorf("LookupProvider(%q).EnvVars = %v, want [CLOUD_CODE_URL]", cmd, p.EnvVars)
+		}
+		if p.Target != "https://daily-cloudcode-pa.googleapis.com" {
+			t.Errorf("LookupProvider(%q).Target = %q", cmd, p.Target)
+		}
+		if len(p.Routes) != 1 || p.Routes[0].PathPrefix != "/v1internal" {
+			t.Errorf("LookupProvider(%q).Routes = %+v, want one /v1internal route", cmd, p.Routes)
+		}
+	}
+}
+
 // TestAntigravityBlockEnvelopeShape guards the agy fix: a blocked Antigravity
 // request must return the Google error envelope (not the Anthropic default,
 // which agy's Code Assist client can't parse — it rendered as a generic

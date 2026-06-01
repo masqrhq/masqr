@@ -52,9 +52,6 @@ func main() {
 	onFinding := flag.String("on-finding", "block", "behavior on a triggering finding: block (return 451, never contact upstream) | redact (rewrite span with __LABEL_N__, restore in response)")
 	shutdownGrace := flag.Duration("shutdown-grace", 5*time.Second, "HTTP graceful shutdown timeout")
 	showVersion := flag.BoolP("version", "V", false, "print masqr version and exit")
-	tlsIntercept := flag.Bool("tls-intercept", false, "intercept the child over TLS on a random free loopback port via an https:// endpoint override (agy's CLOUD_CODE_URL) — no :443, sudo, LD_PRELOAD, or /etc/hosts")
-	doMacosSetup := flag.Bool("macos-setup", false, "macOS one-time setup (run with sudo): install persistent /etc/hosts + pf rdr :443->:8443 + LaunchDaemon so `masqr agy` runs without per-session sudo")
-	doMacosTeardown := flag.Bool("macos-teardown", false, "macOS: remove what --macos-setup installed (run with sudo)")
 
 	// Display friendly defaults in --help instead of the literal empty
 	// strings — the real defaults come from provider auto-detection.
@@ -82,26 +79,6 @@ func main() {
 	// --version takes no child command; answer and exit before arg checks.
 	if *showVersion {
 		fmt.Printf("masqr %s %s/%s\n", version, runtime.GOOS, runtime.GOARCH)
-		return
-	}
-
-	// macOS one-time setup/teardown take no child command.
-	if *doMacosSetup || *doMacosTeardown {
-		if runtime.GOOS != "darwin" {
-			log.Fatal("--macos-setup/--macos-teardown are macOS-only")
-		}
-		if os.Geteuid() != 0 {
-			log.Fatal("run with sudo, e.g.: sudo masqr --macos-setup")
-		}
-		var err error
-		if *doMacosSetup {
-			err = macosSetup()
-		} else {
-			err = macosTeardown()
-		}
-		if err != nil {
-			log.Fatal(err)
-		}
 		return
 	}
 
@@ -150,12 +127,12 @@ func main() {
 
 	policy := Policy{Threshold: threshold, Provider: provider, OnFinding: findingMode}
 
-	if err := run(args[0], args[1:], *addr, *logPath, *shutdownGrace, policy, *tlsIntercept); err != nil {
+	if err := run(args[0], args[1:], *addr, *logPath, *shutdownGrace, policy); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Duration, policy Policy, tlsIntercept bool) error {
+func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Duration, policy Policy) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -180,21 +157,6 @@ func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Dura
 	log.SetOutput(logFile)
 	defer log.SetOutput(os.Stderr)
 	logger := log.New(logFile, "", log.LstdFlags|log.Lmicroseconds)
-
-	// --tls-intercept: terminate TLS on a random free loopback port and point the
-	// child at it via an https:// endpoint override (CLOUD_CODE_URL). Opt-in —
-	// the plaintext path below already intercepts agy; this is for when masqr
-	// needs the decrypted response stream too (e.g. SSE error injection).
-	if tlsIntercept {
-		return runInterceptEnv(ctx, cliPath, cliArgs, grace, upstream, logger, policy, logPath)
-	}
-
-	// Providers with no base-URL override whose client ignores HTTPS_PROXY take
-	// the transparent-TLS interception path; every other provider — agy included,
-	// via its plaintext CLOUD_CODE_URL override — uses the reverse proxy below.
-	if policy.Provider.Intercept {
-		return runIntercept(ctx, cliPath, cliArgs, grace, upstream, logger, policy, logPath)
-	}
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -261,15 +223,13 @@ func runCLI(ctx context.Context, path string, args, envVars []string, endpoint s
 	for _, v := range envVars {
 		env = append(env, v+"="+endpoint)
 	}
-	// extraEnv carries literal KEY=VALUE pairs (intercept mode: SSL_CERT_FILE,
-	// LD_PRELOAD, GODEBUG, MASQR_REDIRECT_*). Appended last so they take
+	// extraEnv carries literal KEY=VALUE pairs appended last so they take
 	// precedence over any inherited value of the same key.
 	env = append(env, extraEnv...)
 
-	// macOS intercept needs `sudo masqr agy` to bind :443, but agy must run as
-	// the invoking user (its OAuth token + Keychain live there, not root's), so
-	// drop privileges for the child and point HOME/USER back at that user.
-	// Unix-only; a no-op on Windows (see runcli_{unix,windows}.go).
+	// If masqr was started under sudo, run the child as the invoking user so its
+	// per-user config/credentials resolve correctly. Unix-only; a no-op on
+	// Windows (see runcli_{unix,windows}.go).
 	env = dropPrivilegesForChild(cmd, env)
 	cmd.Env = env
 
