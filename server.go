@@ -87,10 +87,22 @@ type parsedRoute struct {
 	url    *url.URL
 }
 
+// forwardRewritten swaps in a masked request body and forwards it upstream,
+// forcing identity response encoding so the restorer can swap placeholders back
+// on the wire without an in-memory gzip/br/zstd round-trip.
+func forwardRewritten(w http.ResponseWriter, r *http.Request, proxy http.Handler, body []byte) {
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	r.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	r.Header.Set("Accept-Encoding", "identity")
+	proxy.ServeHTTP(w, r)
+}
+
 // newProxy builds the scan/redact/block reverse-proxy handler. transport is an
 // optional custom RoundTripper; callers pass nil to use http.DefaultTransport.
 func newProxy(upstream *url.URL, logger *log.Logger, policy Policy, transport http.RoundTripper) http.Handler {
 	memo := newFindingMemo()
+	consent := newMaskConsent()
 
 	// Pre-parse provider Routes. A bad URL is logged once at startup and
 	// dropped from the table — it never silently breaks routing.
@@ -194,9 +206,24 @@ func newProxy(upstream *url.URL, logger *log.Logger, policy Policy, transport ht
 		r.ContentLength = int64(len(body))
 
 		matches := logRequest(logger, id, r, body)
+		debugScanTrace(id, r, body, matches)
+
+		// agy streaming: a `mask` reply consenting to a prior block is honored
+		// even though that turn carries no finding of its own — so it must be
+		// checked before the has-findings gate. From here on the approved
+		// value(s) are auto-masked instead of blocked.
+		if isAgyStreamRequest(policy.Provider, r.URL.Path) && consent.hasPending() &&
+			isMaskAffirmation(extractUserRequest(latestUserText(body))) {
+			approved := consent.approvePending()
+			logger.Printf("[#%d] MASK consent granted for %d value(s)", id, approved)
+			debugOutcome(id, "MASK-CONSENT-ACK", nil)
+			writeAgyStreamText(w, maskAckText(approved))
+			return
+		}
 
 		if blocking := policy.triggering(matches); len(blocking) > 0 {
 			shift := urlPrefixLen(r.URL)
+			enc := r.Header.Get("Content-Encoding")
 
 			// Classify: every triggering match is either redactable
 			// (in-body span with a stable Identity) or not (URL hits,
@@ -205,28 +232,56 @@ func newProxy(upstream *url.URL, logger *log.Logger, policy Policy, transport ht
 			// redactable, we have to block — silently dropping a URL-
 			// borne credential without rewriting the URL would still
 			// forward it to the upstream.
-			redactable := canRedactAll(blocking, body, shift, r.Header.Get("Content-Encoding"))
-
-			if policy.OnFinding == OnFindingRedact && redactable {
+			if policy.OnFinding == OnFindingRedact && canRedactAll(blocking, body, shift, enc) {
 				rewritten := redactSpans(body, blocking, shift, memo)
 				logger.Printf("[#%d] REDACTED %d finding(s); forwarding %d-byte body (was %d)",
 					id, len(blocking), len(rewritten), len(body))
-				r.Body = io.NopCloser(bytes.NewReader(rewritten))
-				r.ContentLength = int64(len(rewritten))
-				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(rewritten)))
-				// Force the upstream to respond with identity encoding
-				// so the response restorer can replace placeholders on
-				// the wire without an in-memory gzip/br/zstd round-trip.
-				r.Header.Set("Accept-Encoding", "identity")
-				proxy.ServeHTTP(w, r)
+				debugOutcome(id, "REDACTED", rewritten)
+				forwardRewritten(w, r, proxy, rewritten)
+				return
+			}
+
+			// agy streaming path: support interactive mask-and-continue.
+			// (Redact mode already returned above; reaching here means block,
+			// or redact with an un-redactable finding. The `mask` consent reply
+			// itself is handled before the has-findings gate above.)
+			if isAgyStreamRequest(policy.Provider, r.URL.Path) {
+				// (b) split into already-consented vs still-blocking.
+				var consented, rest []Match
+				for _, m := range blocking {
+					if consent.isConsented(m.Identity) {
+						consented = append(consented, m)
+					} else {
+						rest = append(rest, m)
+					}
+				}
+
+				// (c) nothing left to block → mask the consented values, forward.
+				if len(rest) == 0 && canRedactAll(consented, body, shift, enc) {
+					rewritten := redactSpans(body, consented, shift, memo)
+					logger.Printf("[#%d] MASKED %d consented finding(s); forwarding", id, len(consented))
+					debugOutcome(id, "MASKED+FORWARDED (consented)", rewritten)
+					forwardRewritten(w, r, proxy, rewritten)
+					return
+				}
+
+				// (d) fresh/partial block → remember the maskable values, offer `mask`.
+				pending := maskableIdentities(rest)
+				consent.setPending(pending)
+				logger.Printf("[#%d] BLOCKED by policy (%d finding(s) >= %s); mask offered=%v",
+					id, len(blocking), policy.Threshold, len(pending) > 0)
+				debugOutcome(id, "BLOCKED (agy stream)", nil)
+				writeAgyStreamBlock(w, blocking, len(pending) > 0)
 				return
 			}
 
 			logger.Printf("[#%d] BLOCKED by policy (%d finding(s) >= %s)", id, len(blocking), policy.Threshold)
+			debugOutcome(id, "BLOCKED", nil)
 			writeBlockResponse(w, blocking, policy.Provider)
 			return
 		}
 
+		debugOutcome(id, "FORWARDED (clean)", body)
 		proxy.ServeHTTP(w, r)
 	})
 }
@@ -339,15 +394,84 @@ func logRequest(logger *log.Logger, id uint64, r *http.Request, body []byte) []M
 // the body stay readable, and so the scanner sees a well-formed boundary
 // between URL text and body bytes.
 func scanRequest(u *url.URL, body []byte) []Match {
-	if u == nil {
-		return DefaultScanner().Scan(body)
+	buf := body
+	if u != nil {
+		uri := u.RequestURI()
+		prefix := "url: " + uri + "\n"
+		b := make([]byte, 0, len(prefix)+len(body))
+		b = append(b, prefix...)
+		b = append(b, body...)
+		buf = b
 	}
-	uri := u.RequestURI()
-	prefix := "url: " + uri + "\n"
-	buf := make([]byte, 0, len(prefix)+len(body))
-	buf = append(buf, prefix...)
-	buf = append(buf, body...)
-	return DefaultScanner().Scan(buf)
+	// Blank out provider protocol blobs (agy/Gemini echo a base64
+	// `thoughtSignature` in every model turn) before scanning, so their
+	// base64/base58 substrings don't trip generic-base64 / bitcoin-address.
+	// Same-length blanking keeps every real finding's offset intact for
+	// redaction, and removes the blob so the recursive base64 decode can't
+	// re-scan it either.
+	return DefaultScanner().Scan(neutralizeOpaqueFields(buf))
+}
+
+// opaqueFieldKeys are JSON string fields whose values are provider protocol
+// metadata — model-internal blobs that are never user content, so any rule that
+// matches inside them is a false positive.
+var opaqueFieldKeys = []string{"thoughtSignature"}
+
+// neutralizeOpaqueFields returns buf with the string values of opaqueFieldKeys
+// overwritten by spaces (same length, so match offsets elsewhere are unchanged).
+// Returns buf itself when there's nothing to blank.
+func neutralizeOpaqueFields(buf []byte) []byte {
+	spans := opaqueSpans(buf)
+	if len(spans) == 0 {
+		return buf
+	}
+	out := append([]byte(nil), buf...)
+	for _, s := range spans {
+		for i := s[0]; i < s[1] && i < len(out); i++ {
+			out[i] = ' '
+		}
+	}
+	return out
+}
+
+// opaqueSpans returns the [start,end) byte ranges of the string values of every
+// opaqueFieldKeys occurrence in buf. Values are base64 (no embedded quotes), but
+// a backslash escape is handled defensively.
+func opaqueSpans(buf []byte) [][2]int {
+	var spans [][2]int
+	for _, key := range opaqueFieldKeys {
+		needle := []byte(`"` + key + `"`)
+		for from := 0; ; {
+			i := bytes.Index(buf[from:], needle)
+			if i < 0 {
+				break
+			}
+			i += from
+			j := i + len(needle)
+			for j < len(buf) && (buf[j] == ' ' || buf[j] == ':' || buf[j] == '\t' || buf[j] == '\n' || buf[j] == '\r') {
+				j++
+			}
+			if j >= len(buf) || buf[j] != '"' {
+				from = i + len(needle)
+				continue
+			}
+			start := j + 1
+			k := start
+			for k < len(buf) {
+				if buf[k] == '\\' {
+					k += 2
+					continue
+				}
+				if buf[k] == '"' {
+					break
+				}
+				k++
+			}
+			spans = append(spans, [2]int{start, k})
+			from = k + 1
+		}
+	}
+	return spans
 }
 
 // redactRequestURI returns the request URI with every value of every known

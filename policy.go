@@ -274,6 +274,142 @@ func writeBlockResponse(w http.ResponseWriter, matches []Match, provider Provide
 	_, _ = w.Write(buf)
 }
 
+// isAgyStreamRequest reports whether this is agy's streaming Code Assist call
+// (…/v1internal:streamGenerateContent). On that path agy silently swallows a
+// JSON error envelope, so the block has to be delivered as a synthetic SSE
+// "model" turn instead (see writeAgyStreamBlock).
+func isAgyStreamRequest(p Provider, path string) bool {
+	return p.Name == "antigravity" && strings.Contains(path, "streamGenerateContent")
+}
+
+// writeAgyStreamBlock answers a blocked agy streaming request with a 200
+// text/event-stream carrying one synthetic GenerateContentResponse (Code Assist
+// nests it under "response"). agy renders the text as a normal assistant reply —
+// so the user sees what tripped and how to keep working, rather than the
+// generic "Agent execution terminated due to error" the swallowed JSON 4xx
+// produces. The real block is still recorded in the session log.
+func writeAgyStreamBlock(w http.ResponseWriter, matches []Match, offerMask bool) {
+	writeAgyStreamText(w, blockAdvice(matches, offerMask))
+}
+
+// maskAckText confirms a `mask` consent reply.
+func maskAckText(n int) string {
+	switch {
+	case n <= 0:
+		return "✓ Masking is on for this chat. Resend your message and I’ll continue normally."
+	case n == 1:
+		return "✓ Masking enabled — I’ll mask that value for the rest of this chat; it won’t reach the model.\n\nResend your message and I’ll pick up normally."
+	default:
+		return fmt.Sprintf("✓ Masking enabled — I’ll mask those %d values for the rest of this chat; they won’t reach the model.\n\nResend your message and I’ll pick up normally.", n)
+	}
+}
+
+// writeAgyStreamText emits one synthetic Code Assist SSE event (a model turn
+// carrying text) at HTTP 200 — the response shape agy renders on its streaming
+// endpoint. Used for both the block explanation and the mask ack.
+func writeAgyStreamText(w http.ResponseWriter, text string) {
+	type part struct {
+		Text string `json:"text"`
+	}
+	type content struct {
+		Role  string `json:"role"`
+		Parts []part `json:"parts"`
+	}
+	type candidate struct {
+		Content      content `json:"content"`
+		FinishReason string  `json:"finishReason"`
+		Index        int     `json:"index"`
+	}
+	env := struct {
+		Response struct {
+			Candidates []candidate `json:"candidates"`
+		} `json:"response"`
+	}{}
+	env.Response.Candidates = []candidate{{
+		Content:      content{Role: "model", Parts: []part{{Text: text}}},
+		FinishReason: "STOP",
+	}}
+
+	buf, err := json.Marshal(env)
+	if err != nil {
+		buf = []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"masqr blocked this prompt; it never left your machine."}]},"finishReason":"STOP"}]}}`)
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Masqr-Blocked", "1")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(buf)
+	_, _ = w.Write([]byte("\n\n"))
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// blockAdvice renders the user-facing explanation for a blocked prompt: what
+// tripped (rule · category · severity, with the already-redacted snippet) and
+// concrete next steps for continuing the work — tailored to whether secrets,
+// PII, or both were involved.
+func blockAdvice(matches []Match, offerMask bool) string {
+	var b strings.Builder
+	// agy renders no markdown and no ANSI colour, but it DOES colour emoji —
+	// so the red marker is an inherently-red glyph (no red-shield emoji exists).
+	// ⛔ is red and reads as "blocked".
+	b.WriteString("⛔ masqr blocked this prompt — nothing was sent; it never left your machine.\n\n")
+	b.WriteString("What I caught:\n")
+	seen := map[string]bool{}
+	var hasSecret, hasPII bool
+	var exampleSnippet, exampleLabel string // first maskable finding, for the placeholder demo
+	for _, m := range matches {
+		switch {
+		case strings.HasPrefix(m.Category, "pii"):
+			hasPII = true
+		case m.Category != "attachment" && m.Category != "internal-ip":
+			hasSecret = true
+		}
+		if seen[m.RuleID] {
+			continue
+		}
+		seen[m.RuleID] = true
+		snip := ""
+		if m.Snippet != "" {
+			snip = " — “" + m.Snippet + "”"
+		}
+		fmt.Fprintf(&b, "  • %s (%s · %s)%s\n", m.RuleID, m.Category, m.Severity, snip)
+		if exampleLabel == "" && m.Identity != "" && m.Snippet != "" {
+			exampleSnippet, exampleLabel = m.Snippet, placeholderLabel(m.RuleID)
+		}
+	}
+	b.WriteString("\nHeads-up: your CLI resends the whole conversation each turn, so this value is now in the chat history — masqr will keep blocking until it's masked or gone.\n")
+	b.WriteString("\nHow to continue:\n")
+	n := 1
+	if offerMask {
+		fmt.Fprintf(&b, "  %d. Reply `mask` to mask the flagged value(s) for the rest of this chat, then resend.", n)
+		if exampleLabel != "" {
+			fmt.Fprintf(&b, " Masking swaps the value for a placeholder — e.g. “%s” → `__%s_1__` — so the model only ever sees the placeholder, while you still see your real value in my replies.", exampleSnippet, exampleLabel)
+		} else {
+			b.WriteString(" The value is swapped for a placeholder the model can't read back.")
+		}
+		b.WriteByte('\n')
+		n++
+		fmt.Fprintf(&b, "  %d. Want that on every prompt automatically? Relaunch with `--on-finding=redact` (e.g. `masqr --on-finding=redact agy`) — same masking, no need to reply each time.\n", n)
+		n++
+	}
+	fmt.Fprintf(&b, "  %d. Or clear the conversation so the flagged turn drops out of history — type `/clear` (or `?` for your CLI's shortcuts) — then leave the value out.\n", n)
+	n++
+	fmt.Fprintf(&b, "  %d. False positive? Raise the threshold: `masqr --block-on=high agy` blocks only high/critical findings.\n", n)
+	switch {
+	case hasSecret && hasPII:
+		b.WriteString("\nA credential and personal data were involved: rotate the credential if it was real, keep secrets in environment variables or a secrets manager, and use a synthetic value for the personal data.")
+	case hasSecret:
+		b.WriteString("\nA credential was involved: if it was a real one, rotate it — and pass secrets via environment variables or a secrets manager rather than pasting them into prompts.")
+	case hasPII:
+		b.WriteString("\nThis is personal data: prefer a synthetic or anonymized value (or describe it abstractly) — the model rarely needs the real thing.")
+	}
+	return b.String()
+}
+
 // gaxiosTriggerWords matches case-insensitive substrings that trigger
 // gaxios's defaultErrorRedactor on the response body. The redactor calls
 // `redactString(data.response, "data")` which replaces the entire response

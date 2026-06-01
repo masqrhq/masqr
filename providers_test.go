@@ -248,11 +248,12 @@ func TestAntigravityProfileUsesCloudCodeURL(t *testing.T) {
 	}
 }
 
-// TestAntigravityBlockEnvelopeShape guards the agy fix: a blocked Antigravity
-// request must return the Google error envelope (not the Anthropic default,
-// which agy's Code Assist client can't parse — it rendered as a generic
-// "Agent execution terminated due to error"), at HTTP 400 so the message is
-// surfaced to the user.
+// TestAntigravityBlockEnvelopeShape guards the agy fix on the *non-streaming*
+// path (:generateContent): a blocked Antigravity request must return the Google
+// error envelope (not the Anthropic default, which agy's Code Assist client
+// can't parse — it rendered as a generic "Agent execution terminated due to
+// error"), at HTTP 400 so the message is surfaced. The streaming path is
+// covered separately by TestAntigravityStreamBlockReturnsSSE.
 func TestAntigravityBlockEnvelopeShape(t *testing.T) {
 	agy, _ := LookupProvider("agy")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -265,7 +266,7 @@ func TestAntigravityBlockEnvelopeShape(t *testing.T) {
 	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
 
 	body := strings.NewReader(`{"contents":[{"parts":[{"text":"key=AKIAIOSFODNN7EXAMPLE"}]}]}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1internal:streamGenerateContent", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1internal:generateContent", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -313,6 +314,123 @@ func TestAntigravityBlockEnvelopeShape(t *testing.T) {
 	var be blockedError
 	if err := json.Unmarshal(w.Body.Bytes(), &be); err == nil && be.Type == "error" {
 		t.Errorf("body parsed as Anthropic envelope; agy needs the Google shape")
+	}
+}
+
+// TestAntigravityStreamBlockReturnsSSE locks in the streaming-block behavior:
+// a blocked agy …:streamGenerateContent request must come back as a 200
+// text/event-stream carrying a synthetic model turn with the advice text (agy
+// swallows a JSON 4xx on this path), not the error envelope.
+func TestAntigravityStreamBlockReturnsSSE(t *testing.T) {
+	agy, _ := LookupProvider("agy")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("upstream must not be hit")
+	}))
+	defer upstream.Close()
+	u, _ := url.Parse(upstream.URL)
+
+	policy := Policy{Threshold: SevCritical, Provider: agy}
+	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
+
+	body := strings.NewReader(`{"contents":[{"parts":[{"text":"key=AKIAIOSFODNN7EXAMPLE"}]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1internal:streamGenerateContent?alt=sse", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (agy swallows 4xx on the stream path)", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("content-type = %q, want text/event-stream", ct)
+	}
+	out := w.Body.String()
+	if !strings.HasPrefix(out, "data: ") {
+		t.Fatalf("response not SSE-framed: %.40q", out)
+	}
+	var env struct {
+		Response struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"content"`
+				FinishReason string `json:"finishReason"`
+			} `json:"candidates"`
+		} `json:"response"`
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(out, "data: "))
+	if err := json.Unmarshal([]byte(payload), &env); err != nil {
+		t.Fatalf("SSE payload is not valid JSON: %v\n%s", err, payload)
+	}
+	if len(env.Response.Candidates) == 0 || len(env.Response.Candidates[0].Content.Parts) == 0 {
+		t.Fatalf("no candidate text in SSE response: %s", payload)
+	}
+	if env.Response.Candidates[0].FinishReason != "STOP" {
+		t.Errorf("finishReason = %q, want STOP", env.Response.Candidates[0].FinishReason)
+	}
+	txt := env.Response.Candidates[0].Content.Parts[0].Text
+	for _, want := range []string{"masqr blocked", "`mask`", "aws"} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("advice text missing %q; got:\n%s", want, txt)
+		}
+	}
+}
+
+// TestAgyMaskConsentFlow exercises the full in-chat consent: a block offers
+// `mask`, a `mask` reply consents, and a later turn carrying the same value is
+// then masked-and-forwarded instead of blocked.
+func TestAgyMaskConsentFlow(t *testing.T) {
+	agy, _ := LookupProvider("agy")
+	var forwarded int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded++
+		b, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(b), "info@example.com") {
+			t.Errorf("upstream received the raw email: %s", b)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]}}]}}\n\n"))
+	}))
+	defer upstream.Close()
+	// Point agy's /v1internal route at the test upstream so a forwarded
+	// (masked) request lands here instead of the real Code Assist host.
+	agy.Routes = []Route{{PathPrefix: "/v1internal", Target: upstream.URL}}
+	agy.Target = upstream.URL
+	u, _ := url.Parse(upstream.URL)
+	h := newProxy(u, log.New(io.Discard, "", 0), Policy{Threshold: SevLow, Provider: agy}, nil)
+
+	post := func(text string) *httptest.ResponseRecorder {
+		body := `{"contents":[{"role":"user","parts":[{"text":"<USER_REQUEST>\n` + text + `\n</USER_REQUEST>"}]}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1internal:streamGenerateContent?alt=sse", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+
+	// 1. Email trips a block that offers `mask`.
+	if w := post("email me at info@example.com"); w.Code != 200 || !strings.Contains(w.Body.String(), "`mask`") {
+		t.Fatalf("first turn: want block offering mask; got %d\n%s", w.Code, w.Body.String())
+	}
+	if forwarded != 0 {
+		t.Fatalf("nothing should have been forwarded yet (got %d)", forwarded)
+	}
+	// 2. `mask` reply consents.
+	if w := post("mask"); !strings.Contains(w.Body.String(), "Masking enabled") {
+		t.Fatalf("consent turn: want ack; got:\n%s", w.Body.String())
+	}
+	if forwarded != 0 {
+		t.Fatalf("consent ack must not forward (got %d)", forwarded)
+	}
+	// 3. Re-sending the email is now masked and forwarded (not blocked).
+	w := post("email me at info@example.com")
+	if w.Code != 200 || strings.Contains(w.Body.String(), "masqr blocked") {
+		t.Fatalf("post-consent turn should forward, not block; got %d\n%s", w.Code, w.Body.String())
+	}
+	if forwarded != 1 {
+		t.Fatalf("post-consent turn should forward exactly once; forwarded=%d", forwarded)
 	}
 }
 
