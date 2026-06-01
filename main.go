@@ -201,7 +201,7 @@ func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Dura
 		// `[OPTIONS]` slot every modern CLI uses, ahead of any subcommand
 		// or positional prompt the user typed.
 		mergedArgs := append(append([]string{}, extras...), cliArgs...)
-		err := runCLI(ctx, cliPath, mergedArgs, policy.Provider.EnvVars, endpoint, nil)
+		err := runCLI(ctx, cliPath, mergedArgs, policy.Provider.EnvVars, endpoint, policy.Provider.EnvEndpointSuffix, nil)
 		stop()
 		return err
 	})
@@ -226,11 +226,13 @@ func expandExtraArgs(args []string, endpoint string) []string {
 	return out
 }
 
-func runCLI(ctx context.Context, path string, args, envVars []string, endpoint string, extraEnv []string) error {
+func runCLI(ctx context.Context, path string, args, envVars []string, endpoint, envSuffix string, extraEnv []string) error {
 	cmd := exec.CommandContext(ctx, path, args...)
 	env := os.Environ()
 	for _, v := range envVars {
-		env = append(env, v+"="+endpoint)
+		// envSuffix is normally empty; Mistral's vibe needs the `/v1` segment
+		// kept on its api_base override (see Provider.EnvEndpointSuffix).
+		env = append(env, v+"="+endpoint+envSuffix)
 	}
 	// extraEnv carries literal KEY=VALUE pairs appended last so they take
 	// precedence over any inherited value of the same key.

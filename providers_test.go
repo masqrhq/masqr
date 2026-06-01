@@ -50,6 +50,12 @@ func TestLookupProviderMatchesBasenames(t *testing.T) {
 		{"codex", "openai", true},
 		{"openai", "openai", true},
 
+		{"vibe", "mistral", true},
+		{"/usr/local/bin/vibe", "mistral", true},
+		{"mistral", "mistral", true},
+		{"mistral-vibe", "mistral", true},
+		{"VIBE", "mistral", true}, // case-insensitive
+
 		{"vim", "generic", false}, // unknown → generic fallback
 		{"/usr/local/bin/some-llm", "generic", false},
 	}
@@ -375,6 +381,74 @@ func TestAntigravityStreamBlockReturnsSSE(t *testing.T) {
 		if !strings.Contains(txt, want) {
 			t.Errorf("advice text missing %q; got:\n%s", want, txt)
 		}
+	}
+}
+
+// TestMistralProfileUsesVibeApiBaseEnv locks in vibe's redirect contract: the
+// profile targets the public Mistral API, exports the override through vibe's
+// nested-config env var, and — critically — carries the `/v1` EnvEndpointSuffix.
+// Without that suffix vibe's get_server_url_from_api_base rejects the override
+// as "Invalid API base URL" and the proxy is a no-op.
+func TestMistralProfileUsesVibeApiBaseEnv(t *testing.T) {
+	for _, cmd := range []string{"vibe", "mistral", "mistral-vibe", "/usr/local/bin/vibe", "VIBE"} {
+		p, ok := LookupProvider(cmd)
+		if !ok {
+			t.Fatalf("LookupProvider(%q): not found", cmd)
+		}
+		if p.Target != "https://api.mistral.ai" {
+			t.Errorf("LookupProvider(%q).Target = %q, want https://api.mistral.ai", cmd, p.Target)
+		}
+		if len(p.EnvVars) != 1 || p.EnvVars[0] != "VIBE_PROVIDERS__MISTRAL__API_BASE" {
+			t.Errorf("LookupProvider(%q).EnvVars = %v, want [VIBE_PROVIDERS__MISTRAL__API_BASE]", cmd, p.EnvVars)
+		}
+		if p.EnvEndpointSuffix != "/v1" {
+			t.Errorf("LookupProvider(%q).EnvEndpointSuffix = %q, want /v1", cmd, p.EnvEndpointSuffix)
+		}
+		if !containsFold(p.AuthHeaders, "authorization") {
+			t.Errorf("LookupProvider(%q).AuthHeaders missing authorization: %v", cmd, p.AuthHeaders)
+		}
+	}
+}
+
+// TestMistralBlockEnvelopeShape: a blocked vibe request comes back as the
+// default (Anthropic-shaped) 451. vibe's Mistral backend surfaces the block
+// reason via ErrorResponse.primary_message, which matches the `error.message`
+// field of this envelope — so the user sees what tripped. vibe's SDK raises on
+// the non-2xx for both stream and non-stream paths, so (unlike agy) no
+// synthetic-SSE handling is needed; this guards that the envelope still carries
+// a "message" key for the parser to pick up.
+func TestMistralBlockEnvelopeShape(t *testing.T) {
+	vibe, _ := LookupProvider("vibe")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("upstream must not be hit")
+	}))
+	defer upstream.Close()
+	u, _ := url.Parse(upstream.URL)
+
+	policy := Policy{Threshold: SevCritical, Provider: vibe}
+	h := newProxy(u, log.New(io.Discard, "", 0), policy, nil)
+
+	body := strings.NewReader(`{"messages":[{"role":"user","content":"AKIAIOSFODNN7EXAMPLE"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnavailableForLegalReasons {
+		t.Fatalf("status = %d, want 451", w.Code)
+	}
+	var be blockedError
+	if err := json.Unmarshal(w.Body.Bytes(), &be); err != nil {
+		t.Fatalf("decode block envelope: %v", err)
+	}
+	if be.Error.Type != "masqr_blocked" {
+		t.Errorf("envelope type = %q, want masqr_blocked", be.Error.Type)
+	}
+	// vibe's ErrorResponse.primary_message reads error.message; it must be
+	// present and carry the block reason or the user gets a blank error.
+	if !strings.Contains(be.Error.Message, "masqr blocked") {
+		t.Errorf("error.message missing block reason (vibe shows this): %q", be.Error.Message)
 	}
 }
 
