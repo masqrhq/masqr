@@ -206,6 +206,74 @@ func TestValidatorRejection(t *testing.T) {
 	}
 }
 
+// TestAzureConnStringRules covers the five Azure connection-string / key
+// rules in defaultRules(). The AccountKey value is the well-known Azurite
+// (devstore) development key — 88 base64 chars, matching both the
+// account-key {86,90} window and the conn-string {40,} window.
+func TestAzureConnStringRules(t *testing.T) {
+	s := NewScanner(defaultRules())
+	const k = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+	cases := []struct {
+		name, body, want string
+	}{
+		{"storage-conn", "conn DefaultEndpointsProtocol=https;AccountName=mystore;AccountKey=" + k + ";EndpointSuffix=core.windows.net", "azure-storage-conn-string"},
+		{"account-key", "key AccountKey=" + k + " in config", "azure-storage-account-key"},
+		{"service-bus", "bus Endpoint=sb://myns.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=abcDEF123ghiJKL456mnoPQR789stu= end", "azure-service-bus-conn"},
+		{"cosmos", "cosmos AccountEndpoint=https://mycosmos.documents.azure.com:443/;AccountKey=" + k + "; trailing", "azure-cosmos-conn"},
+		{"sql", "sql Server=tcp:myserver.database.windows.net,1433;Initial Catalog=mydb;User ID=admin;Password=P@ssw0rd123!; done", "azure-sql-conn"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ms := s.Scan([]byte(c.body))
+			hit := false
+			for _, m := range ms {
+				if m.RuleID == c.want {
+					hit = true
+					if m.Category != "azure" {
+						t.Errorf("%s: category=%q, want azure", c.want, m.Category)
+					}
+					break
+				}
+			}
+			if !hit {
+				t.Errorf("expected %s to match in %q; got rules=%v", c.want, c.body, ruleIDs(ms))
+			}
+		})
+	}
+}
+
+// TestPrivateIPv6Rule covers the private-ipv6 internal-IP rule (ULA fc00::/7
+// and link-local fe80::/10).
+func TestPrivateIPv6Rule(t *testing.T) {
+	s := NewScanner(defaultRules())
+	cases := []struct {
+		name, body string
+	}{
+		{"ula-fd", "internal host fd00:1234:5678:9abc::1 reachable"},
+		{"link-local-fe80", "iface fe80::1ff:fe23:4567:890a is link-local"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hit := false
+			for _, m := range s.Scan([]byte(c.body)) {
+				if m.RuleID == "private-ipv6" {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				t.Errorf("expected private-ipv6 to match in %q", c.body)
+			}
+		})
+	}
+	// A public IPv6 (2001:db8::) must NOT trip the private-range rule.
+	for _, m := range s.Scan([]byte("public 2001:db8::1 address")) {
+		if m.RuleID == "private-ipv6" {
+			t.Errorf("private-ipv6 should not match public 2001:db8::1: %+v", m)
+		}
+	}
+}
+
 func ruleIDs(ms []Match) []string {
 	out := make([]string, 0, len(ms))
 	seen := map[string]bool{}
