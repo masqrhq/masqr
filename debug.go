@@ -95,7 +95,7 @@ func debugScanTrace(id uint64, r *http.Request, body []byte, matches []Match) {
 		}
 		emitJSON(map[string]any{
 			"id": id, "event": "scan", "method": r.Method, "path": r.URL.RequestURI(),
-			"coverage": map[string]any{"rules": sc.RuleCount(), "sources": sc.SourceNames()},
+			"coverage":  map[string]any{"rules": sc.RuleCount(), "sources": sc.SourceNames()},
 			"req_bytes": len(body), "req": string(body), "findings": findings,
 		})
 		return
