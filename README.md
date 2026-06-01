@@ -19,6 +19,14 @@
 
 📖 [Full reference](docs/reference.md) · 🤝 [Contributing](CONTRIBUTING.md) · 📝 [Changelog](CHANGELOG.md)
 
+<p align="center"><sub><b>WORKS WITH</b></sub></p>
+<p align="center">
+  <a href="https://www.anthropic.com/claude-code"><img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-D97757?style=for-the-badge&logo=anthropic&logoColor=white"></a>
+  <a href="https://openai.com/codex/"><img alt="Codex" src="https://img.shields.io/badge/Codex-000000?style=for-the-badge&logoColor=white"></a>
+  <a href="https://ai.google.dev/gemini-api/docs"><img alt="Gemini" src="https://img.shields.io/badge/Gemini-1C69FF?style=for-the-badge&logo=googlegemini&logoColor=white"></a>
+  <a href="https://antigravity.google/"><img alt="Antigravity" src="https://img.shields.io/badge/Antigravity-4285F4?style=for-the-badge&logo=google&logoColor=white"></a>
+</p>
+
 ## Features at a glance
 
 - **Wraps the CLI you already use** — `masqr claude`, `masqr codex`, `masqr gemini`, `masqr agy`. The provider (upstream, env vars, auth redaction) is auto-detected from the command name; no flags needed.
