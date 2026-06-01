@@ -36,7 +36,7 @@ type Provider struct {
 	// Name is a stable identifier used in the banner, in the per-request
 	// log header, and to pick a provider-specific error envelope when
 	// writing a 451 block response. One of: "anthropic", "google-gemini",
-	// "openai", or "generic".
+	// "openai", "antigravity", "mistral", or "generic".
 	Name string
 
 	// Target is the primary upstream API base URL the reverse proxy
@@ -81,15 +81,17 @@ type Provider struct {
 	// runCLI substitutes with the masqr listener URL right before exec.
 	ExtraArgs []string
 
-	// EnvEndpointSuffix is appended to the listener URL when exporting each
-	// entry in EnvVars. Almost every CLI wants the bare endpoint, so this is
-	// usually empty. Mistral's `vibe` is the exception: its backend derives
-	// the SDK server_url by stripping a trailing `/v<N>` segment off the
-	// configured api_base (get_server_url_from_api_base) and rejects any value
-	// without that segment as "Invalid API base URL". So vibe needs
-	// VIBE_PROVIDERS__MISTRAL__API_BASE=http://<listener>/v1, and masqr sets
-	// EnvEndpointSuffix="/v1" to produce it.
-	EnvEndpointSuffix string
+	// Prepare runs provider-specific setup immediately before the child CLI
+	// is exec'd, for CLIs that can't be redirected by a base-URL env var. It
+	// receives the masqr listener URL and returns extra KEY=VALUE env entries
+	// to export (appended after EnvVars so they win) plus a cleanup func run
+	// on exit. Mistral's `vibe` is the sole user: it has no base-URL env knob
+	// — its provider list lives in config.toml and isn't addressable by an
+	// env var (VibeConfig sets no env_nested_delimiter and `providers` is a
+	// list, so a `VIBE_PROVIDERS__MISTRAL__API_BASE` is silently dropped). So
+	// Prepare builds a throwaway VIBE_HOME whose config.toml points vibe's
+	// Mistral provider at the listener. nil for every other provider.
+	Prepare func(endpoint string) (env []string, cleanup func(), err error)
 }
 
 // Route binds a request-path prefix to an upstream URL. The first matching
@@ -158,31 +160,27 @@ var antigravityProfile = Provider{
 	AuthHeaders: []string{"authorization", "x-goog-api-key"},
 }
 
-// mistralProfile drives Mistral's `vibe` CLI. vibe's Mistral backend reads its
-// upstream from the providers.mistral.api_base config field, which is
-// overridable from the environment via VIBE_PROVIDERS__MISTRAL__API_BASE (vibe
-// maps the `__` separator onto nested config keys). The wrinkle: vibe doesn't
-// hand api_base to the Mistral SDK verbatim — it derives the SDK server_url by
-// stripping a trailing `/v<N>` segment (get_server_url_from_api_base, regex
-// `(https?://.+)(/v\d+.*)`), and rejects any value lacking that segment as
-// "Invalid API base URL". So masqr can't export the bare listener URL; it
-// exports VIBE_PROVIDERS__MISTRAL__API_BASE=http://<listener>/v1 via
-// EnvEndpointSuffix. vibe's SDK then POSTs /v1/chat/completions in plaintext to
-// the listener (an http:// server_url selects the plaintext transport, exactly
-// like agy's CLOUD_CODE_URL), and masqr forwards to api.mistral.ai — the same
-// plaintext reverse-proxy path as every other provider, no TLS intercept. The
-// API key rides in Authorization: Bearer, so that header joins the redaction
-// set. A blocked request comes back as the default (Anthropic-shaped) 451
-// envelope, whose "message" field vibe surfaces through its own error renderer
-// (ErrorResponse.primary_message); unlike agy, vibe's SDK raises on a non-2xx
-// for both the streaming and non-streaming paths, so no synthetic-SSE block is
-// needed.
+// mistralProfile drives Mistral's `vibe` CLI. Unlike every other provider, vibe
+// has no base-URL env-var override: its upstream lives in the `[[providers]]`
+// api_base field of config.toml, and that list can't be addressed by an env var
+// (VibeConfig sets no env_nested_delimiter and `providers` is a list, so a
+// `VIBE_PROVIDERS__MISTRAL__API_BASE` is silently ignored — verified). So the
+// redirect runs through Prepare (prepareVibeHome): masqr builds a throwaway
+// VIBE_HOME mirroring the real one with config.toml's Mistral provider api_base
+// rewritten to http://<listener>/v1. vibe strips the trailing /v1 to derive the
+// SDK server_url (get_server_url_from_api_base); an http:// value makes the SDK
+// speak plaintext (like agy's CLOUD_CODE_URL), so masqr stays a plain reverse
+// proxy to api.mistral.ai — no TLS intercept. The API key rides in
+// Authorization: Bearer, so that header joins the redaction set. A blocked
+// request comes back as the default (Anthropic-shaped) 451 envelope, whose
+// "message" field vibe surfaces through its own error renderer
+// (ErrorResponse.primary_message); vibe's SDK raises on a non-2xx for both the
+// streaming and non-streaming paths, so no synthetic-SSE block is needed.
 var mistralProfile = Provider{
-	Name:              "mistral",
-	Target:            "https://api.mistral.ai",
-	EnvVars:           []string{"VIBE_PROVIDERS__MISTRAL__API_BASE"},
-	EnvEndpointSuffix: "/v1",
-	AuthHeaders:       []string{"authorization"},
+	Name:        "mistral",
+	Target:      "https://api.mistral.ai",
+	AuthHeaders: []string{"authorization"},
+	Prepare:     prepareVibeHome,
 }
 
 // openAIProfileFor builds the openai/codex profile at lookup time so it

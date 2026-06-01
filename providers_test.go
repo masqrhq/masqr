@@ -23,8 +23,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 // TestLookupProviderMatchesBasenames covers the path-stripping behaviour:
@@ -384,12 +388,11 @@ func TestAntigravityStreamBlockReturnsSSE(t *testing.T) {
 	}
 }
 
-// TestMistralProfileUsesVibeApiBaseEnv locks in vibe's redirect contract: the
-// profile targets the public Mistral API, exports the override through vibe's
-// nested-config env var, and — critically — carries the `/v1` EnvEndpointSuffix.
-// Without that suffix vibe's get_server_url_from_api_base rejects the override
-// as "Invalid API base URL" and the proxy is a no-op.
-func TestMistralProfileUsesVibeApiBaseEnv(t *testing.T) {
+// TestMistralProfileUsesPrepare locks in vibe's redirect contract: vibe has no
+// base-URL env var, so the profile carries a Prepare hook (not EnvVars) and
+// targets the public Mistral API. A regression to the env-var approach would
+// silently no-op (the env var is ignored by vibe) and is guarded here.
+func TestMistralProfileUsesPrepare(t *testing.T) {
 	for _, cmd := range []string{"vibe", "mistral", "mistral-vibe", "/usr/local/bin/vibe", "VIBE"} {
 		p, ok := LookupProvider(cmd)
 		if !ok {
@@ -398,15 +401,159 @@ func TestMistralProfileUsesVibeApiBaseEnv(t *testing.T) {
 		if p.Target != "https://api.mistral.ai" {
 			t.Errorf("LookupProvider(%q).Target = %q, want https://api.mistral.ai", cmd, p.Target)
 		}
-		if len(p.EnvVars) != 1 || p.EnvVars[0] != "VIBE_PROVIDERS__MISTRAL__API_BASE" {
-			t.Errorf("LookupProvider(%q).EnvVars = %v, want [VIBE_PROVIDERS__MISTRAL__API_BASE]", cmd, p.EnvVars)
+		if p.Prepare == nil {
+			t.Errorf("LookupProvider(%q).Prepare is nil; vibe can't be redirected by an env var", cmd)
 		}
-		if p.EnvEndpointSuffix != "/v1" {
-			t.Errorf("LookupProvider(%q).EnvEndpointSuffix = %q, want /v1", cmd, p.EnvEndpointSuffix)
+		if len(p.EnvVars) != 0 {
+			t.Errorf("LookupProvider(%q).EnvVars = %v, want none (vibe ignores env base-URL overrides)", cmd, p.EnvVars)
 		}
 		if !containsFold(p.AuthHeaders, "authorization") {
 			t.Errorf("LookupProvider(%q).AuthHeaders missing authorization: %v", cmd, p.AuthHeaders)
 		}
+	}
+}
+
+// TestWriteVibeConfigRewritesAPIBase is the core of the vibe redirect: given a
+// real config.toml, the Mistral chat provider's api_base must be rewritten to
+// <endpoint>/v1 (the /v1 is required — vibe strips it to derive the SDK
+// server_url) while every other provider and setting is preserved.
+func TestWriteVibeConfigRewritesAPIBase(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.toml")
+	const orig = `active_model = "mistral-medium-3.5"
+api_timeout = 720.0
+
+[[providers]]
+name = "mistral"
+api_base = "https://api.mistral.ai/v1"
+backend = "mistral"
+
+[[providers]]
+name = "llamacpp"
+api_base = "http://127.0.0.1:8080/v1"
+backend = "generic"
+
+[[tts_providers]]
+name = "mistral"
+api_base = "https://api.mistral.ai"
+`
+	if err := os.WriteFile(src, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "out.toml")
+	if err := writeVibeConfig(src, dst, "http://127.0.0.1:51234"); err != nil {
+		t.Fatalf("writeVibeConfig: %v", err)
+	}
+
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := toml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decode rewritten config: %v", err)
+	}
+	provs, _ := doc["providers"].([]any)
+	var mistral, llama map[string]any
+	for _, p := range provs {
+		m := p.(map[string]any)
+		switch m["name"] {
+		case "mistral":
+			mistral = m
+		case "llamacpp":
+			llama = m
+		}
+	}
+	if mistral == nil {
+		t.Fatal("mistral provider missing after rewrite")
+	}
+	if got := mistral["api_base"]; got != "http://127.0.0.1:51234/v1" {
+		t.Errorf("mistral api_base = %v, want http://127.0.0.1:51234/v1", got)
+	}
+	// Other providers and the chat backend tag must survive untouched.
+	if mistral["backend"] != "mistral" {
+		t.Errorf("mistral backend changed: %v", mistral["backend"])
+	}
+	if llama == nil || llama["api_base"] != "http://127.0.0.1:8080/v1" {
+		t.Errorf("llamacpp provider altered: %v", llama)
+	}
+	// The tts_providers Mistral entry must NOT be rewritten (separate array).
+	tts, _ := doc["tts_providers"].([]any)
+	if len(tts) != 1 || tts[0].(map[string]any)["api_base"] != "https://api.mistral.ai" {
+		t.Errorf("tts_providers wrongly modified: %v", tts)
+	}
+	if doc["active_model"] != "mistral-medium-3.5" {
+		t.Errorf("unrelated setting lost: active_model = %v", doc["active_model"])
+	}
+}
+
+// TestWriteVibeConfigSynthesizesWhenMissing: with no real config (or no mistral
+// provider), masqr injects one so the redirect still applies.
+func TestWriteVibeConfigSynthesizesWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "out.toml")
+	if err := writeVibeConfig(filepath.Join(dir, "does-not-exist.toml"), dst, "http://127.0.0.1:9000"); err != nil {
+		t.Fatalf("writeVibeConfig: %v", err)
+	}
+	data, _ := os.ReadFile(dst)
+	var doc map[string]any
+	if err := toml.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	provs, _ := doc["providers"].([]any)
+	if len(provs) != 1 || provs[0].(map[string]any)["api_base"] != "http://127.0.0.1:9000/v1" {
+		t.Fatalf("synthesized mistral provider missing/wrong: %v", provs)
+	}
+}
+
+// TestPrepareVibeHomeMirrors checks the temp VIBE_HOME: it carries a rewritten
+// config.toml and symlinks the user's other files (.env etc.) so auth survives,
+// and cleanup removes it without touching the real home.
+func TestPrepareVibeHomeMirrors(t *testing.T) {
+	realHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realHome, "config.toml"),
+		[]byte("[[providers]]\nname = \"mistral\"\napi_base = \"https://api.mistral.ai/v1\"\nbackend = \"mistral\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realHome, ".env"), []byte("MISTRAL_API_KEY=secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VIBE_HOME", realHome)
+
+	env, cleanup, err := prepareVibeHome("http://127.0.0.1:7777")
+	if err != nil {
+		t.Fatalf("prepareVibeHome: %v", err)
+	}
+	defer cleanup()
+
+	if len(env) != 1 || !strings.HasPrefix(env[0], "VIBE_HOME=") {
+		t.Fatalf("env = %v, want one VIBE_HOME= entry", env)
+	}
+	tmpHome := strings.TrimPrefix(env[0], "VIBE_HOME=")
+	if tmpHome == realHome {
+		t.Fatal("temp VIBE_HOME must differ from the real one")
+	}
+	// .env must be reachable (symlinked) with the real key.
+	if b, rerr := os.ReadFile(filepath.Join(tmpHome, ".env")); rerr != nil || !strings.Contains(string(b), "secret") {
+		t.Errorf(".env not mirrored: err=%v body=%q", rerr, b)
+	}
+	// config.toml must be a rewritten copy, not the original.
+	b, _ := os.ReadFile(filepath.Join(tmpHome, "config.toml"))
+	if !strings.Contains(string(b), "http://127.0.0.1:7777/v1") {
+		t.Errorf("temp config.toml not rewritten: %s", b)
+	}
+	// The real config.toml must be untouched.
+	rb, _ := os.ReadFile(filepath.Join(realHome, "config.toml"))
+	if !strings.Contains(string(rb), "https://api.mistral.ai/v1") {
+		t.Errorf("real config.toml was modified: %s", rb)
+	}
+
+	cleanup()
+	if _, serr := os.Stat(tmpHome); !os.IsNotExist(serr) {
+		t.Errorf("cleanup did not remove temp VIBE_HOME (%v)", serr)
+	}
+	if _, serr := os.Stat(realHome); serr != nil {
+		t.Errorf("cleanup removed the real home: %v", serr)
 	}
 }
 

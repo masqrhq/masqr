@@ -7,6 +7,7 @@ require (
 	github.com/andybalholm/brotli v1.2.1
 	github.com/creack/pty v1.1.24
 	github.com/klauspost/compress v1.18.6
+	github.com/pelletier/go-toml/v2 v2.2.3
 	github.com/spf13/pflag v1.0.10
 	github.com/yalue/onnxruntime_go v1.30.1
 	github.com/zricethezav/gitleaks/v8 v8.30.1
@@ -55,7 +56,6 @@ require (
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/nwaples/rardecode/v2 v2.2.1 // indirect
-	github.com/pelletier/go-toml/v2 v2.2.3 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect

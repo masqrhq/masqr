@@ -121,7 +121,7 @@ func main() {
 	if provider.Target == "" {
 		provider.Target = "https://api.anthropic.com"
 	}
-	if len(provider.EnvVars) == 0 {
+	if len(provider.EnvVars) == 0 && provider.Prepare == nil {
 		provider.EnvVars = []string{"ANTHROPIC_BASE_URL"}
 	}
 
@@ -201,7 +201,20 @@ func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Dura
 		// `[OPTIONS]` slot every modern CLI uses, ahead of any subcommand
 		// or positional prompt the user typed.
 		mergedArgs := append(append([]string{}, extras...), cliArgs...)
-		err := runCLI(ctx, cliPath, mergedArgs, policy.Provider.EnvVars, endpoint, policy.Provider.EnvEndpointSuffix, nil)
+		// Providers that can't be redirected by an env var (Mistral's vibe)
+		// do their setup here and hand back extra env + a cleanup to run on
+		// exit. extraEnv is appended after EnvVars so it takes precedence.
+		var extraEnv []string
+		if policy.Provider.Prepare != nil {
+			pe, cleanup, perr := policy.Provider.Prepare(endpoint)
+			if perr != nil {
+				stop()
+				return fmt.Errorf("%s setup: %w", policy.Provider.Name, perr)
+			}
+			defer cleanup()
+			extraEnv = pe
+		}
+		err := runCLI(ctx, cliPath, mergedArgs, policy.Provider.EnvVars, endpoint, extraEnv)
 		stop()
 		return err
 	})
@@ -226,13 +239,11 @@ func expandExtraArgs(args []string, endpoint string) []string {
 	return out
 }
 
-func runCLI(ctx context.Context, path string, args, envVars []string, endpoint, envSuffix string, extraEnv []string) error {
+func runCLI(ctx context.Context, path string, args, envVars []string, endpoint string, extraEnv []string) error {
 	cmd := exec.CommandContext(ctx, path, args...)
 	env := os.Environ()
 	for _, v := range envVars {
-		// envSuffix is normally empty; Mistral's vibe needs the `/v1` segment
-		// kept on its api_base override (see Provider.EnvEndpointSuffix).
-		env = append(env, v+"="+endpoint+envSuffix)
+		env = append(env, v+"="+endpoint)
 	}
 	// extraEnv carries literal KEY=VALUE pairs appended last so they take
 	// precedence over any inherited value of the same key.
