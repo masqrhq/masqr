@@ -219,6 +219,9 @@ func emailContextRefine(body []byte, start, end int) (int, int, bool) {
 	if hasNoReplyLocalPart(body[start:end]) {
 		return 0, 0, false
 	}
+	if isVibeEmail(body[start:end]) {
+		return 0, 0, false
+	}
 	if hasUserEmailContextMarker(body, start) {
 		return 0, 0, false
 	}
@@ -233,6 +236,12 @@ func hasNoReplyLocalPart(span []byte) bool {
 		return false
 	}
 	return bytes.EqualFold(span[:len(prefix)], []byte(prefix))
+}
+
+// isVibeEmail returns true if the matched email is "vibe@mistral.ai" (case-insensitive).
+// CLI-metadata/agent address, never user-typed.
+func isVibeEmail(span []byte) bool {
+	return bytes.EqualFold(span, []byte("vibe@mistral.ai"))
 }
 
 // userEmailContextWindow is how far back from the match we look for a

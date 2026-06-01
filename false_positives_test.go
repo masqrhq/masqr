@@ -128,6 +128,16 @@ func TestEmailContextRefine(t *testing.T) {
 			"shipping notifications go to noreply@my-domain.com",
 			false, // noreply@ is template-shaped; we drop it everywhere
 		},
+		{
+			"vibe agent email — drop",
+			"Co-Authored-By: Mistral Vibe <vibe@mistral.ai>\n",
+			false,
+		},
+		{
+			"vibe email mixed case — drop",
+			"please contact ViBe@MiStRaL.aI",
+			false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
