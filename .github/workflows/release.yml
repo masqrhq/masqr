@@ -105,3 +105,6 @@ jobs:
             ${{ env.ASSET }}.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
+          # Hyphenated tags (v1.2.3-rc1, -beta…) are prereleases, so they never
+          # supersede a real release as "Latest".
+          prerelease: ${{ contains(github.ref_name, '-') }}
