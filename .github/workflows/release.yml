@@ -61,40 +61,17 @@ jobs:
             -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
             -o "$out" .
           ls -lh "$out"
-
-      - name: Stage release archive
-        shell: bash
-        run: |
-          stem="masqr-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          bin="dist/${stem}${{ matrix.ext }}"
-          # Stage under dist/stage/ so the staging dir never collides with the
-          # binary path — for non-windows targets ext is empty, making
-          # dist/${stem} both the binary file and the would-be staging dir.
-          staging="dist/stage/${stem}"
-          mkdir -p "$staging"
-          cp "$bin" "$staging/masqr${{ matrix.ext }}"
-          cp LICENSE NOTICE README.md "$staging/"
-          cp -r LICENSES "$staging/"
-          case "${{ matrix.goos }}" in
-            windows)
-              (cd dist/stage && 7z a "../${stem}.zip" "${stem}/")
-              echo "ASSET=dist/${stem}.zip" >> "$GITHUB_ENV"
-              ;;
-            *)
-              (cd dist/stage && tar -czf "../${stem}.tar.gz" "${stem}/")
-              echo "ASSET=dist/${stem}.tar.gz" >> "$GITHUB_ENV"
-              ;;
-          esac
+          # Ship the bare binary — no tar/zip. The sha256 sits next to it.
+          echo "ASSET=$out" >> "$GITHUB_ENV"
 
       - name: Generate sha256
         shell: bash
         run: |
           asset="${{ env.ASSET }}"
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$asset" > "${asset}.sha256"
-          else
-            shasum -a 256 "$asset" > "${asset}.sha256"
-          fi
+          dir=$(dirname "$asset"); base=$(basename "$asset")
+          # Checksum the basename so `sha256sum -c` works where the file lands.
+          ( cd "$dir" && { command -v sha256sum >/dev/null 2>&1 \
+              && sha256sum "$base" || shasum -a 256 "$base"; } > "${base}.sha256" )
           cat "${asset}.sha256"
 
       - name: Upload to GitHub Release
