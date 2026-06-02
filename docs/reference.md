@@ -163,7 +163,7 @@ flags:
                                   one of: critical|high|medium|low
   -e, --env string              env var to expose proxy URL      (provider-profile default; overrides profile)
   -k, --keywords string         path to <keyword>|<TYPE> wordlist
-  -l, --log string              session log file                 (default masqr-<ts>.log)
+  -l, --log string              session log file                 (default <user-cache-dir>/masqr/masqr-<ts>.log)
       --on-finding string       block (default) | redact
       --shutdown-grace duration HTTP graceful shutdown            (default 5s)
   -t, --target string           upstream API                     (provider-profile default; overrides profile)
@@ -384,7 +384,7 @@ The keyword prefilter is a literal-set Aho-Corasick trie (`BobuSumisu/aho-corasi
 
 ## Logging
 
-One log file per session, named `masqr-<YYYYMMDD-HHMMSS>.log` in the cwd (override with `-l`). Format:
+One log file per session, named `masqr-<YYYYMMDD-HHMMSS>.log` under the OS-native user cache dir, created on demand; override the full path with `-l`. The cache root follows `os.UserCacheDir()` — `$XDG_CACHE_HOME/masqr/` (else `~/.cache/masqr/`) on Linux, `~/Library/Caches/masqr/` on macOS, `%LocalAppData%\masqr\` on Windows — the same root the bundled OCR runtime is cached under. Format:
 
 ```
 2026/05/18 08:17:29.485612

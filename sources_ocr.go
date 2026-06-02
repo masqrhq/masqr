@@ -256,19 +256,13 @@ func extractEmbeddedLib() (string, error) {
 	return path, nil
 }
 
-// cacheDir returns the per-content cache directory, preferring
-// $XDG_CACHE_HOME, then $HOME/.cache, then $TMPDIR / os.MkdirTemp as a final
-// fallback. The short content hash is appended so different bundled-runtime
-// versions don't clobber each other.
+// cacheDir returns the per-content cache directory under masqrCacheDir() (the
+// OS-native user cache root — see that function), with $TMPDIR / os.MkdirTemp
+// as a final fallback. The short content hash is appended so different
+// bundled-runtime versions don't clobber each other.
 func cacheDir(short string) (string, error) {
-	base := os.Getenv("XDG_CACHE_HOME")
-	if base == "" {
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			base = filepath.Join(home, ".cache")
-		}
-	}
-	if base != "" {
-		return filepath.Join(base, "masqr", "onnxruntime-"+short), nil
+	if base := masqrCacheDir(); base != "" {
+		return filepath.Join(base, "onnxruntime-"+short), nil
 	}
 	// No usable cache dir — fall back to a per-process temp dir (the legacy
 	// behaviour). This branch is rare (containers with no $HOME, etc.).

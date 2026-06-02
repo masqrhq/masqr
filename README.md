@@ -14,7 +14,7 @@
 ```
  ▟█▙ ▟█▙   masqr  · deep prompt inspection [google-gemini]
  ▜█▄▄▄█▛   http://127.0.0.1:38219 → https://generativelanguage.googleapis.com
-  ▘   ▘    log: masqr-20260518-093142.log
+  ▘   ▘    log: ~/.cache/masqr/masqr-20260518-093142.log
 ```
 
 📖 [Full reference](docs/reference.md) · 🤝 [Contributing](CONTRIBUTING.md) · 📝 [Changelog](CHANGELOG.md)

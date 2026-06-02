@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -46,7 +47,7 @@ func main() {
 	addr := flag.StringP("addr", "a", "127.0.0.1:0", "HTTP listen address (use :0 for random port)")
 	envVars := flag.StringSliceP("env", "e", nil, "env var(s) to expose the proxy URL to the child (comma-separated or repeated; overrides provider profile)")
 	target := flag.StringP("target", "t", "", "upstream API the proxy forwards to (overrides provider profile; also disables provider Routes)")
-	logPath := flag.StringP("log", "l", "", "log file path (overrides per-session default)")
+	logPath := flag.StringP("log", "l", "", "log file path (overrides the per-session default under the cache dir)")
 	keywords := flag.StringP("keywords", "k", "", "path to a <keyword>|<TYPE> wordlist for the keyword scanner (overrides MASQR_KEYWORDS / auto-discovery)")
 	blockOn := flag.String("block-on", "low", "severity threshold for triggering: critical|high|medium|low (default low → act on any finding)")
 	onFinding := flag.String("on-finding", "block", "behavior on a triggering finding: block (return 451, never contact upstream) | redact (rewrite span with __LABEL_N__, restore in response)")
@@ -58,7 +59,7 @@ func main() {
 	flag.Lookup("env").DefValue = "from provider profile (e.g. ANTHROPIC_BASE_URL, GOOGLE_GEMINI_BASE_URL)"
 	flag.Lookup("target").DefValue = "from provider profile (e.g. https://api.anthropic.com)"
 
-	flag.Lookup("log").DefValue = "masqr-<YYYYMMDD-HHMMSS>.log"
+	flag.Lookup("log").DefValue = "<user-cache-dir>/masqr/masqr-<YYYYMMDD-HHMMSS>.log"
 
 	flag.CommandLine.SetInterspersed(false) // stop parsing at first positional, so child's flags pass through
 	flag.Usage = func() {
@@ -132,12 +133,46 @@ func main() {
 	}
 }
 
+// masqrCacheDir returns masqr's per-user cache root using the OS-native
+// location from os.UserCacheDir():
+//
+//   - Linux:   $XDG_CACHE_HOME/masqr   (else ~/.cache/masqr)
+//   - macOS:   ~/Library/Caches/masqr
+//   - Windows: %LocalAppData%\masqr
+//
+// It returns "" when no cache dir is resolvable (rare: no $HOME / %LocalAppData%).
+// Both the session log (defaultLogPath) and the bundled OCR runtime (cacheDir)
+// hang off this root so they stay together on every platform.
+func masqrCacheDir() string {
+	base, err := os.UserCacheDir()
+	if err != nil || base == "" {
+		return ""
+	}
+	return filepath.Join(base, "masqr")
+}
+
+// defaultLogPath returns the per-session log path when -l is not given:
+// <masqrCacheDir>/masqr-<YYYYMMDD-HHMMSS>.log, creating the directory on demand.
+// If no cache dir is resolvable it falls back to the bare filename in the
+// current directory.
+func defaultLogPath() string {
+	name := fmt.Sprintf("masqr-%s.log", time.Now().Format("20060102-150405"))
+	dir := masqrCacheDir()
+	if dir == "" {
+		return name
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return name
+	}
+	return filepath.Join(dir, name)
+}
+
 func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Duration, policy Policy) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	if logPath == "" {
-		logPath = fmt.Sprintf("masqr-%s.log", time.Now().Format("20060102-150405"))
+		logPath = defaultLogPath()
 	}
 
 	upstream, err := url.Parse(policy.Provider.Target)
