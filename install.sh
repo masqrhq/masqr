@@ -64,8 +64,8 @@ fi
 need tar
 
 # ─── Detect OS / arch and map to release asset naming ────────────────────────
-# Release assets are produced by .github/workflows/release.yml as
-#   masqr-<tag>-<goos>-<goarch>.tar.gz   (+ .sha256)
+# Release assets are produced by .github/workflows/release.yml as the bare
+# binary  masqr-<tag>-<goos>-<goarch>   (+ .sha256)
 os=$(uname -s)
 case "$os" in
   Linux)  GOOS=linux  ;;
@@ -118,25 +118,25 @@ info "installing ${BOLD}masqr $TAG${RESET} ($GOOS/$GOARCH)"
 
 stem="masqr-${TAG}-${GOOS}-${GOARCH}"
 base="https://github.com/$REPO/releases/download/$TAG"
-tarball_url="$base/${stem}.tar.gz"
-sha_url="$base/${stem}.tar.gz.sha256"
+bin_url="$base/${stem}"
+sha_url="$base/${stem}.sha256"
 
-# ─── Download + verify + extract in a scratch dir ────────────────────────────
+# ─── Download + verify in a scratch dir ──────────────────────────────────────
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/masqr.XXXXXX") || die "mktemp failed"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-info "downloading ${stem}.tar.gz…"
-http_download "$tarball_url" "$tmp/${stem}.tar.gz" \
-  || die "download failed: $tarball_url
+info "downloading ${stem}…"
+http_download "$bin_url" "$tmp/$BIN_NAME" \
+  || die "download failed: $bin_url
     Asset may not exist for this platform/version."
 
 # Verify SHA-256 if the sidecar is present (it always should be).
-if http_download "$sha_url" "$tmp/${stem}.tar.gz.sha256" 2>/dev/null; then
-  expected=$(awk '{print $1; exit}' "$tmp/${stem}.tar.gz.sha256")
+if http_download "$sha_url" "$tmp/${stem}.sha256" 2>/dev/null; then
+  expected=$(awk '{print $1; exit}' "$tmp/${stem}.sha256")
   if command -v sha256sum >/dev/null 2>&1; then
-    actual=$(sha256sum "$tmp/${stem}.tar.gz" | awk '{print $1}')
+    actual=$(sha256sum "$tmp/$BIN_NAME" | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
-    actual=$(shasum -a 256 "$tmp/${stem}.tar.gz" | awk '{print $1}')
+    actual=$(shasum -a 256 "$tmp/$BIN_NAME" | awk '{print $1}')
   else
     actual=""; warn "no sha256sum/shasum; skipping checksum verification"
   fi
@@ -150,11 +150,8 @@ else
   warn "no .sha256 sidecar published; skipping checksum verification"
 fi
 
-info "extracting…"
-tar -xzf "$tmp/${stem}.tar.gz" -C "$tmp"
-src="$tmp/$stem/$BIN_NAME"
-[ -f "$src" ] || src=$(find "$tmp" -type f -name "$BIN_NAME" -perm -u+x 2>/dev/null | head -1)
-[ -n "$src" ] && [ -f "$src" ] || die "couldn't find '$BIN_NAME' inside the archive"
+# The asset is the bare binary — no extraction step.
+src="$tmp/$BIN_NAME"
 
 # ─── Install atomically ──────────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR"

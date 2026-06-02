@@ -60,37 +60,30 @@ Info "installing masqr $tag (windows/$goarch)"
 
 $stem    = "masqr-$tag-windows-$goarch"
 $base    = "https://github.com/$Repo/releases/download/$tag"
-$zipUrl  = "$base/$stem.zip"
-$shaUrl  = "$base/$stem.zip.sha256"
+$exeUrl  = "$base/$stem.exe"
+$shaUrl  = "$base/$stem.exe.sha256"
 
-# --- Download + verify + extract in a temp dir --------------------------------
+# --- Download + verify in a temp dir ------------------------------------------
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("masqr-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 try {
-  $zip = Join-Path $tmp "$stem.zip"
-  Info "downloading $stem.zip..."
-  try { Invoke-WebRequest -UseBasicParsing -Uri $zipUrl -OutFile $zip }
-  catch { Die "download failed: $zipUrl (asset may not exist for this platform/version)" }
+  # The asset is the bare .exe — no extraction step.
+  $src = Join-Path $tmp 'masqr.exe'
+  Info "downloading $stem.exe..."
+  try { Invoke-WebRequest -UseBasicParsing -Uri $exeUrl -OutFile $src }
+  catch { Die "download failed: $exeUrl (asset may not exist for this platform/version)" }
 
   # Verify SHA-256 against the published sidecar.
   try {
-    $shaFile = Join-Path $tmp "$stem.zip.sha256"
+    $shaFile = Join-Path $tmp "$stem.exe.sha256"
     Invoke-WebRequest -UseBasicParsing -Uri $shaUrl -OutFile $shaFile
     $expected = ((Get-Content $shaFile -Raw).Trim() -split '\s+')[0].ToLower()
-    $actual   = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
+    $actual   = (Get-FileHash -Algorithm SHA256 -Path $src).Hash.ToLower()
     if ($expected -ne $actual) { Die "checksum mismatch!`n    expected $expected`n    got      $actual" }
     Ok 'checksum verified'
   } catch {
     if ($_.Exception.Message -like '*checksum mismatch*') { throw }
     Write-Host "! no .sha256 sidecar; skipping checksum verification" -ForegroundColor Yellow
-  }
-
-  Info 'extracting...'
-  Expand-Archive -Path $zip -DestinationPath $tmp -Force
-  $src = Join-Path $tmp "$stem\masqr.exe"
-  if (-not (Test-Path $src)) {
-    $found = Get-ChildItem -Path $tmp -Recurse -Filter 'masqr.exe' | Select-Object -First 1
-    if ($found) { $src = $found.FullName } else { Die "couldn't find masqr.exe inside the archive" }
   }
 
   # --- Install ----------------------------------------------------------------
