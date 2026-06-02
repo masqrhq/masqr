@@ -70,3 +70,60 @@ func TestThoughtSignatureNotScanned(t *testing.T) {
 		t.Error("a real AWS key outside the thoughtSignature must still be flagged")
 	}
 }
+
+// TestThinkingBlockNotScanned guards the Anthropic extended-thinking case: the
+// `signature` and `thinking` text of a thinking block, and the `data` of a
+// redacted_thinking block, must not be scanned (masking any of them mutates the
+// signed bytes and the upstream rejects the turn with 400 "Invalid `signature`
+// in `thinking` block"), while a real secret in the user's text still trips.
+func TestThinkingBlockNotScanned(t *testing.T) {
+	// Long, varied base64 blobs standing in for the signed thinking bytes —
+	// the kind that trip generic-base64-blob / bitcoin-legacy-address.
+	sig := "ErUECmMIDhgCKkA" + strings.Repeat("aB3xZ9kQwR7vT2mN", 16) + "ig=="
+	// A secret the model echoed into its own reasoning: masqr must not touch
+	// it, because the signature covers the thinking text too.
+	think := "let me use AKIAIOSFODNN7THINKKEY from the env"
+	data := "WaEoCpEDAQ" + strings.Repeat("Zq8xV2nB5kM7wR3t", 16) + "ag=="
+	body := []byte(`{"messages":[` +
+		`{"role":"assistant","content":[` +
+		`{"type":"thinking","thinking":"` + think + `","signature":"` + sig + `"},` +
+		`{"type":"redacted_thinking","data":"` + data + `"}]},` +
+		`{"role":"user","content":[{"type":"text","text":"deploy with AKIAIOSFODNN7EXAMPLE now"}]}]}`)
+
+	var sawUserAWS bool
+	for _, m := range scanRequest(nil, body) {
+		if m.End <= 0 || m.End > len(body) {
+			continue
+		}
+		got := string(body[m.Offset:m.End])
+		switch m.RuleID {
+		case "aws-access-key-id":
+			if got == "AKIAIOSFODNN7EXAMPLE" {
+				sawUserAWS = true
+			} else {
+				t.Errorf("a thinking-block secret was flagged: %q", got)
+			}
+		case "generic-base64-blob", "bitcoin-legacy-address":
+			t.Errorf("a thinking-block blob produced a false finding: %s %q", m.RuleID, got)
+		}
+	}
+	if !sawUserAWS {
+		t.Error("a real AWS key in the user's text must still be flagged")
+	}
+}
+
+// TestGenericSignatureFieldStillScanned proves the scoping is tight: a JSON
+// field merely named `signature` that is NOT a thinking-block sibling is still
+// scanned, so blanking thinking signatures doesn't open a blanket blind spot.
+func TestGenericSignatureFieldStillScanned(t *testing.T) {
+	body := []byte(`{"webhook":{"signature":"AKIAIOSFODNN7EXAMPLE"}}`)
+	var saw bool
+	for _, m := range scanRequest(nil, body) {
+		if m.RuleID == "aws-access-key-id" {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Error("a secret in a non-thinking `signature` field must still be flagged")
+	}
+}

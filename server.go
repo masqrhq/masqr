@@ -457,14 +457,20 @@ func scanRequest(u *url.URL, body []byte) []Match {
 
 // opaqueFieldKeys are JSON string fields whose values are provider protocol
 // metadata — model-internal blobs that are never user content, so any rule that
-// matches inside them is a false positive.
+// matches inside them is a false positive. `thoughtSignature` is agy/Gemini's
+// per-turn base64 thought signature; matching by bare key name is safe because
+// it's unique to that protocol. Anthropic's thinking blocks are handled
+// structurally instead (see thinkingBlockSpans) since `thinking`/`signature`
+// are too generic to blank everywhere.
 var opaqueFieldKeys = []string{"thoughtSignature"}
 
-// neutralizeOpaqueFields returns buf with the string values of opaqueFieldKeys
-// overwritten by spaces (same length, so match offsets elsewhere are unchanged).
-// Returns buf itself when there's nothing to blank.
+// neutralizeOpaqueFields returns buf with model-internal protocol blobs
+// overwritten by spaces (same length, so match offsets elsewhere are
+// unchanged): provider key-named blobs (opaqueFieldKeys) plus the `thinking`
+// text and `signature` of Anthropic extended-thinking blocks. Returns buf
+// itself when there's nothing to blank.
 func neutralizeOpaqueFields(buf []byte) []byte {
-	spans := opaqueSpans(buf)
+	spans := append(opaqueSpans(buf), thinkingBlockSpans(buf)...)
 	if len(spans) == 0 {
 		return buf
 	}
@@ -515,6 +521,209 @@ func opaqueSpans(buf []byte) [][2]int {
 		}
 	}
 	return spans
+}
+
+// thinkingBlockSpans returns the [start,end) byte ranges of the string values
+// masqr must never flag or rewrite inside Anthropic extended-thinking content
+// blocks: the `thinking` text and `signature` of a {"type":"thinking",…} block,
+// and the `data` of a {"type":"redacted_thinking",…} block. The API signs those
+// bytes and replays them verbatim; the `signature` reads as a generic-base64-
+// blob (sometimes with a base58 substring that trips bitcoin-legacy-address),
+// so masqr would otherwise mask it — and rewriting any signed byte makes the
+// upstream reject the next turn with 400 "Invalid `signature` in `thinking`
+// block". Blanking for scanning only (the forwarded body is untouched) keeps
+// the signature valid while leaving the user's own text fully scanned.
+//
+// Unlike opaqueSpans this is structure-aware — it only blanks `thinking`/
+// `signature`/`data` when they're siblings of a thinking `type`, so a field
+// that merely shares one of those generic names elsewhere is still scanned.
+// It's a best-effort raw-byte walk: on malformed JSON it returns the spans
+// found before the parse gave up.
+func thinkingBlockSpans(buf []byte) [][2]int {
+	p := &jsonSpanScanner{b: buf}
+	var spans [][2]int
+	p.value(&spans)
+	return spans
+}
+
+// jsonSpanScanner is a minimal raw-byte JSON walker that preserves exact
+// string-value byte spans (encoding/json's tokenizer decodes escapes and so
+// loses them, which would break same-length blanking).
+type jsonSpanScanner struct {
+	b []byte
+	i int
+}
+
+func (p *jsonSpanScanner) skipWS() {
+	for p.i < len(p.b) {
+		switch p.b[p.i] {
+		case ' ', '\t', '\n', '\r':
+			p.i++
+		default:
+			return
+		}
+	}
+}
+
+// stringSpan assumes the cursor is on an opening quote and returns the
+// [start,end) span of the string's contents (between the quotes), advancing
+// the cursor past the closing quote. ok is false on an unterminated string.
+func (p *jsonSpanScanner) stringSpan() (start, end int, ok bool) {
+	if p.i >= len(p.b) || p.b[p.i] != '"' {
+		return 0, 0, false
+	}
+	p.i++
+	start = p.i
+	for p.i < len(p.b) {
+		switch p.b[p.i] {
+		case '\\':
+			p.i += 2
+		case '"':
+			end = p.i
+			p.i++
+			return start, end, true
+		default:
+			p.i++
+		}
+	}
+	return 0, 0, false
+}
+
+// scalar consumes a number/true/false/null up to the next structural byte.
+func (p *jsonSpanScanner) scalar() {
+	for p.i < len(p.b) {
+		switch p.b[p.i] {
+		case ',', '}', ']', ' ', '\t', '\n', '\r':
+			return
+		default:
+			p.i++
+		}
+	}
+}
+
+// value parses any JSON value at the cursor, appending thinking-block spans it
+// finds. Returns false if it can't make progress (malformed/truncated input).
+func (p *jsonSpanScanner) value(spans *[][2]int) bool {
+	p.skipWS()
+	if p.i >= len(p.b) {
+		return false
+	}
+	switch p.b[p.i] {
+	case '{':
+		return p.object(spans)
+	case '[':
+		return p.array(spans)
+	case '"':
+		_, _, ok := p.stringSpan()
+		return ok
+	default:
+		p.scalar()
+		return true
+	}
+}
+
+func (p *jsonSpanScanner) array(spans *[][2]int) bool {
+	p.i++ // consume '['
+	p.skipWS()
+	if p.i < len(p.b) && p.b[p.i] == ']' {
+		p.i++
+		return true
+	}
+	for {
+		if !p.value(spans) {
+			return false
+		}
+		p.skipWS()
+		if p.i >= len(p.b) {
+			return false
+		}
+		switch p.b[p.i] {
+		case ',':
+			p.i++
+		case ']':
+			p.i++
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+func (p *jsonSpanScanner) object(spans *[][2]int) bool {
+	p.i++ // consume '{'
+	var (
+		isThinking, isRedacted       bool
+		thinkSpan, sigSpan, dataSpan [2]int
+		haveThink, haveSig, haveData bool
+	)
+	p.skipWS()
+	if p.i < len(p.b) && p.b[p.i] == '}' {
+		p.i++
+		return true
+	}
+	for {
+		p.skipWS()
+		ks, ke, ok := p.stringSpan()
+		if !ok {
+			return false
+		}
+		key := string(p.b[ks:ke])
+		p.skipWS()
+		if p.i >= len(p.b) || p.b[p.i] != ':' {
+			return false
+		}
+		p.i++ // consume ':'
+		p.skipWS()
+		// Capture string-value spans for the keys we care about; recurse
+		// into anything else so nested thinking blocks are still found.
+		if p.i < len(p.b) && p.b[p.i] == '"' {
+			vs, ve, ok := p.stringSpan()
+			if !ok {
+				return false
+			}
+			switch key {
+			case "type":
+				switch string(p.b[vs:ve]) {
+				case "thinking":
+					isThinking = true
+				case "redacted_thinking":
+					isRedacted = true
+				}
+			case "thinking":
+				thinkSpan, haveThink = [2]int{vs, ve}, true
+			case "signature":
+				sigSpan, haveSig = [2]int{vs, ve}, true
+			case "data":
+				dataSpan, haveData = [2]int{vs, ve}, true
+			}
+		} else if !p.value(spans) {
+			return false
+		}
+		p.skipWS()
+		if p.i >= len(p.b) {
+			return false
+		}
+		switch p.b[p.i] {
+		case ',':
+			p.i++
+		case '}':
+			p.i++
+			if isThinking {
+				if haveThink {
+					*spans = append(*spans, thinkSpan)
+				}
+				if haveSig {
+					*spans = append(*spans, sigSpan)
+				}
+			}
+			if isRedacted && haveData {
+				*spans = append(*spans, dataSpan)
+			}
+			return true
+		default:
+			return false
+		}
+	}
 }
 
 // redactRequestURI returns the request URI with every value of every known
