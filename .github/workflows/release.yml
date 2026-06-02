@@ -75,13 +75,20 @@ jobs:
           cat "${asset}.sha256"
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
-          generate_release_notes: true
           fail_on_unmatched_files: true
+          # Static body, identical across every matrix job, so the release notes
+          # aren't duplicated — each job overwrites with the same content rather
+          # than appending another generate_release_notes block (a 4-job matrix
+          # with generate_release_notes produced four stacked changelogs).
+          body: |
+            masqr **${{ github.ref_name }}** — see the [CHANGELOG](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md) for what's included.
+
+            **Full Changelog**: https://github.com/${{ github.repository }}/commits/${{ github.ref_name }}
           # Hyphenated tags (v1.2.3-rc1, -beta…) are prereleases, so they never
           # supersede a real release as "Latest".
           prerelease: ${{ contains(github.ref_name, '-') }}
