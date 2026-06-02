@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -310,12 +311,16 @@ func dropEmptyBase64Blobs(in []Match) []Match {
 
 // dedupeMatches removes overlapping matches that point at the same byte
 // range, preferring the higher-severity one. Two findings collapse into one
-// when they share the same (category, snippet, severity) triple — that's
-// the case when built-in `aws-access-key-id` and `gitleaks:<rule>` flag the
-// same secret with the same category ("secret"). Different *categories*
-// represent distinct interpretations (e.g., a 9-digit Luhn-valid number
-// could be a US-SSN or a CA-SIN) and are intentionally kept side-by-side
-// so downstream policy / users can read the context themselves.
+// when they share the same (offset, end, category, severity) — that's the
+// case when built-in `aws-access-key-id` and `gitleaks:<rule>` flag the same
+// secret span with the same category ("secret"). The byte range is part of
+// the key on purpose: the same *value* repeated at different offsets (e.g. an
+// email that appears several times in one request) must stay as separate
+// matches so redactSpans masks every occurrence — keying on the value alone
+// collapsed them to one and leaked the rest upstream in cleartext. Different
+// *categories* represent distinct interpretations (e.g., a 9-digit Luhn-valid
+// number could be a US-SSN or a CA-SIN) and are intentionally kept
+// side-by-side so downstream policy / users can read the context themselves.
 func dedupeMatches(in []Match) []Match {
 	if len(in) <= 1 {
 		return in
@@ -329,7 +334,7 @@ func dedupeMatches(in []Match) []Match {
 	out := make([]Match, 0, len(in))
 	seen := make(map[string]bool, len(in))
 	for _, m := range in {
-		key := m.Category + "|" + strings.ToLower(m.Snippet) + "|" + string(m.Severity)
+		key := strconv.Itoa(m.Offset) + "|" + strconv.Itoa(m.End) + "|" + m.Category + "|" + string(m.Severity)
 		if seen[key] {
 			continue
 		}

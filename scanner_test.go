@@ -87,6 +87,38 @@ func TestDedupeMatches(t *testing.T) {
 	}
 }
 
+// TestDedupeKeepsRepeatedValueAtDifferentOffsets guards the PII-leak fix:
+// the same value flagged at distinct byte ranges must survive dedupe so every
+// occurrence gets its own placeholder. Keying on the value alone collapsed
+// them to one and forwarded the rest upstream in cleartext.
+func TestDedupeKeepsRepeatedValueAtDifferentOffsets(t *testing.T) {
+	in := []Match{
+		{RuleID: "email-address", Category: "pii", Snippet: "info••••••••.com", Severity: SevMedium, Offset: 10, End: 26},
+		{RuleID: "email-address", Category: "pii", Snippet: "info••••••••.com", Severity: SevMedium, Offset: 80, End: 96},
+		{RuleID: "email-address", Category: "pii", Snippet: "info••••••••.com", Severity: SevMedium, Offset: 200, End: 216},
+	}
+	out := dedupeMatches(in)
+	if len(out) != 3 {
+		t.Fatalf("dedupe kept %d, want 3 — repeated value at distinct offsets must not collapse (out=%v)", len(out), out)
+	}
+}
+
+// TestRedactSpansMasksEveryOccurrence is the end-to-end guard: a value that
+// appears multiple times in a request must leave zero cleartext copies in the
+// forwarded body.
+func TestRedactSpansMasksEveryOccurrence(t *testing.T) {
+	s := NewScanner(defaultRules())
+	const email = "info@example.com"
+	body := []byte("from " + email + " and again " + email + " and once more " + email)
+
+	matches := s.Scan(body)
+	out := redactSpans(body, matches, 0, newFindingMemo())
+
+	if strings.Contains(string(out), email) {
+		t.Errorf("forwarded body still contains cleartext %q:\n%s", email, out)
+	}
+}
+
 func TestScannerPrefilterShortCircuits(t *testing.T) {
 	// Build a tiny scanner with one anchored rule. Body without the anchor
 	// must short-circuit before running the expensive pattern.
