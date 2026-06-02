@@ -19,7 +19,9 @@ jobs:
           - { runner: ubuntu-22.04-arm,   goos: linux,   goarch: arm64, ext: ''     }
           - { runner: macos-latest,       goos: darwin,  goarch: arm64, ext: ''     }
           - { runner: windows-latest,     goos: windows, goarch: amd64, ext: '.exe' }
-          - { runner: windows-11-arm,     goos: windows, goarch: arm64, ext: '.exe' }
+          # windows/arm64 is omitted: its runner has no native CGO toolchain
+          # (gcc is x86_64 mingw). Windows-on-ARM runs the amd64 build under x64
+          # emulation. Revisit if a native arm64 artifact is needed.
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout (with LFS)
@@ -65,18 +67,21 @@ jobs:
         run: |
           stem="masqr-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
           bin="dist/${stem}${{ matrix.ext }}"
-          staging="dist/${stem}"
+          # Stage under dist/stage/ so the staging dir never collides with the
+          # binary path — for non-windows targets ext is empty, making
+          # dist/${stem} both the binary file and the would-be staging dir.
+          staging="dist/stage/${stem}"
           mkdir -p "$staging"
           cp "$bin" "$staging/masqr${{ matrix.ext }}"
           cp LICENSE NOTICE README.md "$staging/"
           cp -r LICENSES "$staging/"
           case "${{ matrix.goos }}" in
             windows)
-              (cd dist && 7z a "${stem}.zip" "${stem}/")
+              (cd dist/stage && 7z a "../${stem}.zip" "${stem}/")
               echo "ASSET=dist/${stem}.zip" >> "$GITHUB_ENV"
               ;;
             *)
-              (cd dist && tar -czf "${stem}.tar.gz" "${stem}/")
+              (cd dist/stage && tar -czf "../${stem}.tar.gz" "${stem}/")
               echo "ASSET=dist/${stem}.tar.gz" >> "$GITHUB_ENV"
               ;;
           esac
