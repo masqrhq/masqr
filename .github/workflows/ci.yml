@@ -96,10 +96,12 @@ jobs:
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck -version
           govulncheck -scan module
       - name: osv-scanner
         run: |
           go install github.com/google/osv-scanner/cmd/osv-scanner@latest
+          osv-scanner --version
           osv-scanner --lockfile go.mod
 
   # Sanity-check that the cross-compile build tags are sane, even when we
