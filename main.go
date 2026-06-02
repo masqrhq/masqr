@@ -248,11 +248,6 @@ func runCLI(ctx context.Context, path string, args, envVars []string, endpoint s
 	// extraEnv carries literal KEY=VALUE pairs appended last so they take
 	// precedence over any inherited value of the same key.
 	env = append(env, extraEnv...)
-
-	// If masqr was started under sudo, run the child as the invoking user so its
-	// per-user config/credentials resolve correctly. Unix-only; a no-op on
-	// Windows (see runcli_{unix,windows}.go).
-	env = dropPrivilegesForChild(cmd, env)
 	cmd.Env = env
 
 	if !term.IsTerminal(int(os.Stdin.Fd())) {

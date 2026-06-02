@@ -23,10 +23,6 @@ import (
 	"os/exec"
 )
 
-// dropPrivilegesForChild is a no-op on Windows: there's no sudo/setuid model to
-// drop from, and the privileged :443 intercept that needs it is macOS-only.
-func dropPrivilegesForChild(_ *exec.Cmd, env []string) []string { return env }
-
 // runInteractive forwards stdio directly on Windows. Go's os/exec has no PTY
 // support there and creack/pty doesn't build for Windows; the child (claude,
 // codex, gemini, …) talks to the console via the Win32 console API itself, so

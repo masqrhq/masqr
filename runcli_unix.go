@@ -24,33 +24,11 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"os/user"
-	"runtime"
-	"strconv"
 	"syscall"
 
 	"github.com/creack/pty"
 	"golang.org/x/term"
 )
-
-// dropPrivilegesForChild makes the wrapped CLI run as the invoking user when
-// masqr itself was started with sudo (the macOS :443 intercept needs root to
-// bind the port, but agy's OAuth token + Keychain live in the user's HOME, not
-// root's). Returns env extended with the user's HOME/USER/LOGNAME. No-op unless
-// we're root on darwin via sudo.
-func dropPrivilegesForChild(cmd *exec.Cmd, env []string) []string {
-	if runtime.GOOS == "darwin" && os.Geteuid() == 0 {
-		if su := os.Getenv("SUDO_UID"); su != "" {
-			uid, _ := strconv.Atoi(su)
-			gid, _ := strconv.Atoi(os.Getenv("SUDO_GID"))
-			cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}}
-			if u, uerr := user.LookupId(su); uerr == nil {
-				env = append(env, "HOME="+u.HomeDir, "USER="+u.Username, "LOGNAME="+u.Username)
-			}
-		}
-	}
-	return env
-}
 
 // runInteractive runs the child under a PTY so it sees a real terminal, mirrors
 // terminal resizes via SIGWINCH, and puts our stdin into raw mode so keystrokes
