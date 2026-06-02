@@ -118,7 +118,9 @@ if (($env:PATH -split ';') -notcontains $InstallDir) { $env:PATH = "$env:PATH;$I
 Write-Host ''
 Ok "masqr $tag is ready."
 Write-Host 'Wrap your coding CLI so secrets never leave your machine:' -ForegroundColor DarkGray
+Write-Host '  masqr agy             # Google Antigravity'
 Write-Host '  masqr claude          # Anthropic Claude Code'
 Write-Host '  masqr codex           # OpenAI Codex'
 Write-Host '  masqr gemini -p "..."  # Google Gemini'
+Write-Host '  masqr vibe            # Mistral vibe CLI'
 Write-Host "Docs: https://github.com/$Repo"
