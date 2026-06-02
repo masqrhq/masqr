@@ -81,6 +81,27 @@ jobs:
           version: latest
           install-go: false
 
+  # Dependency vulnerability scan. Both tools read the official Go vuln
+  # database (pkg.go.dev/vuln) and exit non-zero on any known advisory,
+  # which fails the build. govulncheck runs in module mode so it doesn't
+  # need to compile the cgo onnxruntime_go package.
+  vuln-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck -scan module
+      - name: osv-scanner
+        run: |
+          go install github.com/google/osv-scanner/cmd/osv-scanner@latest
+          osv-scanner --lockfile go.mod
+
   # Sanity-check that the cross-compile build tags are sane, even when we
   # can't actually run the binaries here. Each native build tests its own
   # platform; this job catches "did I forget a build tag" mistakes.
