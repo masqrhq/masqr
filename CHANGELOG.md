@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Windows installer (`install.ps1`) aborted on Windows PowerShell 5.x with `Unable to find type [Net.SecurityProtocol]` — the TLS-1.2 line referenced the wrong enum (it's `SecurityProtocolType`). It now `-bor`s TLS 1.2 onto the current protocols inside a `try/catch` (no-op on PowerShell 7+) and silences the progress bar that otherwise throttles the binary download on PS 5.x.
+
 ## [0.2.0] - 2026-06-02
 
 ### Changed

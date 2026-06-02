@@ -26,7 +26,17 @@
 #   $env:MASQR_REPO         owner/repo; default: masqrhq/masqr
 
 $ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocol]::Tls12
+# Without this, Invoke-WebRequest -OutFile renders a progress bar that slows a
+# ~50 MB binary download by 10-50x on Windows PowerShell 5.x.
+$ProgressPreference = 'SilentlyContinue'
+# Windows PowerShell 5.x negotiates TLS 1.0/1.1 by default, which GitHub rejects.
+# Add TLS 1.2 without clobbering anything already enabled. (The enum is
+# SecurityProtocolType, not SecurityProtocol.) Wrapped in try/catch so it's a
+# no-op on PowerShell 7+, where the property is deprecated/read-only.
+try {
+    [Net.ServicePointManager]::SecurityProtocol = `
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {}
 
 $Repo       = if ($env:MASQR_REPO)        { $env:MASQR_REPO }        else { 'masqrhq/masqr' }
 $InstallDir = if ($env:MASQR_INSTALL_DIR) { $env:MASQR_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'masqr\bin' }
