@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-02
+
+### Changed
+- The default per-session log moved out of the current directory and into the OS-native user cache dir (`os.UserCacheDir()`) — `$XDG_CACHE_HOME/masqr/` (else `~/.cache/masqr/`) on Linux, `~/Library/Caches/masqr/` on macOS, `%LocalAppData%\masqr\` on Windows — created on demand, so masqr no longer drops `masqr-<timestamp>.log` files wherever it's launched. The bundled OCR runtime cache now hangs off the same root. Override the full log path with `-l`.
+- Release assets are the bare per-platform binary (`masqr-<tag>-<os>-<arch>[.exe]`) plus a `.sha256`, instead of a `.tar.gz`/`.zip` archive; the install scripts were updated to match.
+
+### Fixed
+- Release pages no longer repeat the changelog once per build target — the 5-job matrix used a static release body instead of each job regenerating notes. The upload action also moved to a node24 runtime.
+
+### Added
+- Antigravity (`agy`) end-to-end test harness (`scripts/test-agy-e2e.sh`).
+
 ## [0.1.0] - 2026-06-02
 
 First public release.
