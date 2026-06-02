@@ -61,7 +61,7 @@ Prefer to build it yourself? See [Build from source](docs/reference.md#build-fro
 ## Usage
 
 ```sh
-masqr agy                             # wrap Google Antigravity (transparent TLS)
+masqr agy                             # wrap Google Antigravity
 masqr claude                          # wrap Anthropic Claude Code
 masqr codex                           # wrap OpenAI Codex
 masqr gemini -p "summarize file.txt"  # wrap Google Gemini

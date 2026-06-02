@@ -104,7 +104,7 @@ Masqr auto-detects the provider from the child command's basename and applies a 
 | `claude`, `claude-code` | `anthropic` | `https://api.anthropic.com` | `ANTHROPIC_BASE_URL` | `x-api-key`, `anthropic-api-key`, `authorization` | — |
 | `gemini`, `gemini-cli` | `google-gemini` | `https://generativelanguage.googleapis.com` <br/>`/v1internal*` → `https://cloudcode-pa.googleapis.com` | `GOOGLE_GEMINI_BASE_URL`, `CODE_ASSIST_ENDPOINT` | `x-goog-api-key`, `authorization` | `key`, `api_key`, `apikey`, `access_token` |
 | `codex`, `openai` | `openai` | `https://api.openai.com` | `OPENAI_BASE_URL` | `authorization`, `openai-organization`, `openai-project` | — |
-| `agy`, `antigravity` | `antigravity` | `https://daily-cloudcode-pa.googleapis.com` <br/>(transparent TLS interception — see below) | _none_ (no base-URL override exists) | `authorization`, `x-goog-api-key` | — |
+| `agy`, `antigravity` | `antigravity` | `https://daily-cloudcode-pa.googleapis.com` | `CLOUD_CODE_URL` (full plaintext endpoint override — see below) | `authorization`, `x-goog-api-key` | — |
 | `vibe`, `mistral`, `mistral-vibe` | `mistral` | `https://api.mistral.ai` | _none_ — redirected via a rewritten `config.toml` under a temp `VIBE_HOME` (see below) | `authorization` | — |
 | anything else | `generic` | from `--target` | from `--env` (default `ANTHROPIC_BASE_URL`) | universal set | universal set |
 
@@ -116,16 +116,9 @@ For Gemini specifically, masqr also **scans the request URL alongside the body**
 
 > vibe injects a large project-context preamble (file tree, git status) into every prompt, so the default `--block-on=low` can trip on a benign value in that context (e.g. an `email-address` in a path or commit). If a normal session blocks, use `--on-finding redact` or `--block-on=high` — the 451 message vibe prints names the rule and says exactly this.
 
-**Antigravity (`agy`) uses transparent TLS interception, not a base-URL override.** Google's Antigravity CLI has no `*_BASE_URL` knob, hardcodes `daily-cloudcode-pa.googleapis.com` by build channel, and its Code Assist client ignores `HTTPS_PROXY` — so masqr can't redirect it the way it does the other CLIs. Instead `masqr agy` runs a **transparent TLS proxy**: it stands up a local listener on `127.0.0.1:443`, generates a short-lived CA that `agy` trusts via `SSL_CERT_FILE` (system roots **+** the masqr CA, so `agy`'s other TLS calls still validate), redirects the hostname to the listener, and forwards to the real upstream — running the same scan/redact/block engine over the decrypted `/v1internal:*` traffic (including `streamGenerateContent` prompts).
+**Antigravity (`agy`) is redirected via the `CLOUD_CODE_URL` env var.** Google's Antigravity CLI has no `*_BASE_URL` knob and its Code Assist client ignores `HTTPS_PROXY`, but it *does* honor **`CLOUD_CODE_URL`** as a full endpoint override (recovered from `(*CLIAuthProvider).UpdateEndpointURL` in the v1.0.3 binary), and the URL's scheme selects the transport: an `http://` value makes the client speak **plaintext HTTP**. So `masqr agy` simply exports `CLOUD_CODE_URL=http://<listener>` and takes the same ordinary plaintext reverse-proxy path as every other provider — **no transparent-TLS intercept, forged CA, hostname redirect, `/etc/hosts` edit, or `:443`/sudo needed.** It runs the full scan/redact/block engine over `agy`'s `/v1internal:*` traffic (including `streamGenerateContent` prompts) and works identically on Linux and macOS with no per-platform setup.
 
-The hostname redirect is **no-sudo by default**: masqr compiles a tiny `getaddrinfo` `LD_PRELOAD` shim (needs a C compiler — `cc`/`gcc`) and launches `agy` with `GODEBUG=netdns=cgo` so its resolver goes through the shim, scoped to that process only — nothing global changes. If no compiler is present it falls back to a reversible `/etc/hosts` edit (one `sudo` step, restored on exit; force either path with `MASQR_INTERCEPT_REDIRECT=ldpreload|hosts`). Binding `:443` needs no privilege where `net.ipv4.ip_unprivileged_port_start ≤ 443`; otherwise `setcap cap_net_bind_service=+ep ./masqr`.
-
-**macOS** is supported with a one-time trust step (Go on macOS reads the Keychain, not `SSL_CERT_FILE`). On first run masqr writes a **persistent** CA to `~/.masqr/ca.pem`; trust it once — `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/.masqr/ca.pem` (approve the dialog; reverse with `security delete-certificate -c "masqr local CA"`). Then pick one of:
-
-- **No per-session sudo (recommended):** `sudo masqr --macos-setup` once — installs a persistent `/etc/hosts` redirect + a pf `rdr :443→:8443` anchor + a LaunchDaemon (so it survives reboot). Thereafter just **`masqr agy`** with **no sudo** (masqr binds the unprivileged `:8443`). Undo with `sudo masqr --macos-teardown`.
-- **Ad-hoc:** **`sudo masqr agy`** each time — root binds `:443` and edits `/etc/hosts` per session; masqr drops the `agy` child back to your user so it keeps your OAuth/Keychain.
-
-(Windows is not yet supported.) Because `agy`'s prompts are large, the default `--block-on=low` may trip on benign findings; use `--on-finding redact` if a normal session gets blocked.
+Because `agy`'s prompts are large, the default `--block-on=low` may trip on benign findings; use `--on-finding redact` if a normal session gets blocked.
 
 To route an unknown CLI through masqr explicitly:
 
@@ -275,7 +268,6 @@ The proxy itself is `httputil.NewSingleHostReverseProxy` with custom `Director` 
 | `policy.go` | block-or-forward decision, block-advice text, fallback HTTP 451 writer + per-provider error envelope (Anthropic / Google / OpenAI) |
 | `interactive.go` | per-provider model-turn block responses (Anthropic / OpenAI Responses / OpenAI chat / Gemini SSE + JSON) and `mask`-reply parsing for the interactive consent flow |
 | `consent.go` | per-session mask-consent state: pending → consented identities, `mask` affirmation + user-text extraction |
-| `intercept.go` / `intercept_macos.go` | transparent TLS interception for `agy` (LD_PRELOAD/hosts redirect, persistent CA, macOS pf setup) |
 | `scanner.go` | orchestration: Aho-Corasick prefilter → per-rule regex → parallel external sources → base64 decode-rescan → dedupe |
 | `rules.go` | core built-in rule definitions (secrets, Swiss PII, generic) |
 | `rules_presidio.go` | Presidio-derived rules that benefit from keyword anchoring (BTC bech32, generic IBAN, DE VAT, FI HETU) |
@@ -298,7 +290,6 @@ The proxy itself is `httputil.NewSingleHostReverseProxy` with custom `Director` 
 |---|---|
 | `ANTHROPIC_BASE_URL` / `GOOGLE_GEMINI_BASE_URL` / `OPENAI_BASE_URL` | the provider profile picks the right one based on the child command name; override with `-e VAR` for unrecognised CLIs |
 | `MASQR_KEYWORDS` | path to a `<keyword>|<TYPE>` wordlist (overridden by `-k`) |
-| `MASQR_INTERCEPT_REDIRECT` | force the `agy` hostname-redirect path: `ldpreload` or `hosts` |
 | `VIBE_HOME` | read to locate vibe's real config dir (default `~/.vibe`); `masqr vibe` then re-exports it pointing at a temp mirror with a rewritten `config.toml` |
 | `MASQR_OCR=1` | enables the PaddleOCR source (runtime + models are embedded in the binary; no extra files required) |
 | `MASQR_ONNX_LIB` | override path to `libonnxruntime.so` — by default the bundled runtime is extracted to a temp file |
@@ -471,7 +462,7 @@ The catalog and base64 phases stand up masqr as a long-running proxy (with `slee
 - **Base64 detection** only catches the standard alphabet (`+/`); URL-safe (`-_`) without padding gets a smaller window via decode-fallback but isn't anchored by the pattern.
 - **Body cap**: 2 MiB. Past that, the scanner only sees the first 2 MiB. The full body is still logged and forwarded.
 - **External sources**: gitleaks / keywords / OCR are all optional. If a source fails to initialize (missing model, malformed wordlist), it's logged once and the rest keep working.
-- **TLS interception** for non-`agy` providers is out of scope; they take an HTTP base-URL override. `agy` is the exception (see [Provider profiles](#provider-profiles)).
+- **TLS interception** is out of scope entirely: masqr is a plaintext reverse proxy. Every provider takes a plaintext HTTP base-URL (or, for `agy`, `CLOUD_CODE_URL`; for `vibe`, a rewritten `config.toml`) override — see [Provider profiles](#provider-profiles).
 
 ---
 
