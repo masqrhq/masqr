@@ -263,6 +263,21 @@ func (s *Scanner) scanRecursive(body []byte, depth int) []Match {
 				out = append(out, m)
 			}
 		}
+
+		// Decode-and-rescan runs of \uXXXX escapes (JS/JSON unicode obfuscation).
+		for _, hit := range findUnicodeEscapeCandidates(body) {
+			decoded, ok := decodeUnicodeEscapes(hit.text)
+			if !ok || !isMostlyPrintable([]byte(decoded)) {
+				continue
+			}
+			for _, m := range s.scanRecursive([]byte(decoded), depth+1) {
+				m.RuleID += "/unicode-decoded"
+				m.Offset = hit.offset
+				m.End = hit.offset + len(hit.text)
+				m.Identity = ""
+				out = append(out, m)
+			}
+		}
 	}
 
 	if depth == 0 {
