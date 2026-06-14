@@ -8,6 +8,45 @@ func TestFindingFA_a0a9820b1f7d_UnicodeGCP(t *testing.T) {
 	assertRule(t, []byte(prompt), "gcp-api-key")
 }
 
+func TestFindingFP_usSSN_BenignCode(t *testing.T) {
+	samples := []string{
+		`/**
+ * Module dependencies.
+ */
+
+var express = require('../..');
+var path = require('node:path');
+var app = express();
+var logger = require('morgan');
+var cooki`,
+		`if err != nil {
+		panic(err)
+	}
+	*((*time.Time)(ptr)) = t
+}
+
+// endregion
+
+// region *Time Extension
+
+var (
+	timePointerType         = reflect2.TypeOfPtr((**tim`,
+		`// Copyright 2022 Gin Core Team. All rights reserved.
+// Use of this source code is governed by a MIT style
+// license that can be found in the LICENSE file.
+
+p`,
+	}
+	s := NewScanner(defaultRules())
+	for i, sample := range samples {
+		for _, m := range s.Scan([]byte(sample)) {
+			if m.RuleID == "us-ssn" {
+				t.Fatalf("sample %d: unexpected us-ssn on benign code", i)
+			}
+		}
+	}
+}
+
 func assertRule(t *testing.T, body []byte, want string) {
 	t.Helper()
 	s := NewScanner(defaultRules())
