@@ -8,6 +8,11 @@ func TestFindingFA_a0a9820b1f7d_UnicodeGCP(t *testing.T) {
 	assertRule(t, []byte(prompt), "gcp-api-key")
 }
 
+func TestFindingWR_51deadbf545f_UnicodeGCPNotOrgnummer(t *testing.T) {
+	prompt := `Our staging Maps widget 403s after we locked down the GCP project. In Slack I pasted GOOGLE_MAPS_API_KEY="\u0041\u0049\u007a\u0061\u0053\u0079\u0044\u0045\u004d\u004f\u005f\u004b\u0045\u0059\u005f\u0046\u004f\u0052\u005f\u004d\u0041\u0053\u0051\u0052\u005f\u0052\u0045\u0047\u0052\u0045\u0053\u0053\u0049\u004f\u004e\u005f\u0030\u0031\u0032" to unblock QA.`
+	assertRule(t, []byte(prompt), "gcp-api-key")
+}
+
 func TestFindingFP_seOrgnummer_KeywordGated(t *testing.T) {
 	samples := []string{
 		`---
