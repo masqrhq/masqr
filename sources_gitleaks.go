@@ -75,13 +75,19 @@ func (g *gitleaksSource) Scan(body []byte) []Match {
 			// line stays informative even though redact can't fire.
 			offset = lineStart
 		}
+		ruleID := "gitleaks:" + f.RuleID
+		raw := f.Secret
+		if end > offset && offset >= 0 && end <= len(body) {
+			raw = string(body[offset:end])
+		}
 		out = append(out, Match{
-			RuleID:   "gitleaks:" + f.RuleID,
+			RuleID:   ruleID,
 			Category: "secret",
 			Severity: SevCritical,
 			Offset:   offset,
 			End:      end,
 			Snippet:  redactSnippet(f.Secret),
+			Identity: identityOf(ruleID, raw),
 		})
 	}
 	return out

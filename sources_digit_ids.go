@@ -122,6 +122,7 @@ func (d *digitIDSource) Scan(body []byte) []Match {
 			if !hasKeywordNear(body, l[0], l[1], c.Keywords) {
 				continue
 			}
+			rawStr := string(raw)
 			out = append(out, Match{
 				RuleID:   c.ID,
 				Category: c.Category,
@@ -129,6 +130,7 @@ func (d *digitIDSource) Scan(body []byte) []Match {
 				Offset:   l[0],
 				End:      l[1],
 				Snippet:  snippet,
+				Identity: identityOf(c.ID, rawStr),
 			})
 		}
 	}

@@ -123,13 +123,16 @@ func (k *keywordsSource) Scan(body []byte) []Match {
 		}
 
 		sev := severityFor(e.label)
+		ruleID := "keyword:" + e.label
+		raw := string(body[start:end])
 		out = append(out, Match{
-			RuleID:   "keyword:" + e.label,
+			RuleID:   ruleID,
 			Category: "pii-org",
 			Severity: sev,
 			Offset:   start,
 			End:      end,
-			Snippet:  string(body[start:end]),
+			Snippet:  raw,
+			Identity: identityOf(ruleID, raw),
 		})
 	}
 	return out

@@ -110,6 +110,7 @@ func (a *alnumIDSource) Scan(body []byte) []Match {
 				Offset:   l[0],
 				End:      l[1],
 				Snippet:  redactSnippet(raw),
+				Identity: identityOf(c.ID, raw),
 			})
 		}
 	}
