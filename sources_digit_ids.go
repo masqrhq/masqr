@@ -201,6 +201,7 @@ func presidioDigitChecks() []digitCheck {
 		{ID: "se-personnummer", Category: "pii-se", Severity: SevHigh,
 			Min: 10, Max: 12, Validate: sePersonnummer},
 		{ID: "se-orgnummer", Category: "pii-se", Severity: SevMedium,
-			Min: 10, Max: 10, Validate: seOrgnummer},
+			Min: 10, Max: 10, Validate: seOrgnummer,
+			Keywords: []string{"orgnr", "org nummer", "orgnummer", "organisationsnummer"}},
 	}
 }

@@ -8,6 +8,33 @@ func TestFindingFA_a0a9820b1f7d_UnicodeGCP(t *testing.T) {
 	assertRule(t, []byte(prompt), "gcp-api-key")
 }
 
+func TestFindingFP_seOrgnummer_KeywordGated(t *testing.T) {
+	samples := []string{
+		`---
+name: Feature request
+about: Suggest an idea for this project
+labels:
+- "Feature Request"
+- "actions/autoclose-feat"
+
+---
+
+Requests is not accepting feature requests at this time.`,
+		`var express = require('../..');
+var path = require('node:path');
+var app = express();`,
+	}
+	s := DefaultScanner()
+	for i, sample := range samples {
+		for _, m := range s.Scan([]byte(sample)) {
+			if m.RuleID == "se-orgnummer" {
+				t.Fatalf("sample %d: unexpected se-orgnummer without org keyword", i)
+			}
+		}
+	}
+	assertRule(t, []byte("OrgNr 556677-8899 company"), "se-orgnummer")
+}
+
 func TestFindingFP_usSSN_BenignCode(t *testing.T) {
 	samples := []string{
 		`/**
@@ -37,7 +64,7 @@ var (
 
 p`,
 	}
-	s := NewScanner(defaultRules())
+	s := DefaultScanner()
 	for i, sample := range samples {
 		for _, m := range s.Scan([]byte(sample)) {
 			if m.RuleID == "us-ssn" {
@@ -49,7 +76,7 @@ p`,
 
 func assertRule(t *testing.T, body []byte, want string) {
 	t.Helper()
-	s := NewScanner(defaultRules())
+	s := DefaultScanner()
 	for _, m := range s.Scan(body) {
 		if m.RuleID == want || m.RuleID == want+"/unicode-decoded" || m.RuleID == want+"/base64-decoded" {
 			return
