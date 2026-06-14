@@ -32,8 +32,8 @@ func defaultRules() []Rule {
 		// ─── Secrets (Tier-1 — credential leaks) ─────────────────────────
 		{
 			ID: "aws-access-key-id", Category: "secret", Severity: SevCritical,
-			Keywords: []string{"AKIA", "ASIA", "AGPA", "AIDA", "AROA", "AIPA", "ANPA", "ANVA"},
-			Pattern:  mk(`\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b`),
+			Keywords: []string{"AKIA", "ASIA"},
+			Pattern:  mk(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`),
 		},
 		{
 			ID: "aws-secret-access-key", Category: "secret", Severity: SevCritical,
