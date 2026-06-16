@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-16
+
+### Added
+- **Unicode-obfuscated key detection.** The scanner now decodes contiguous `\uXXXX` escape runs and rescans the decoded text, so a Google/Maps API key smuggled as `AIz…` is caught (as `gcp-api-key/unicode-decoded`) instead of slipping through as inert text.
+
+### Changed
+- Building from source now requires **Go 1.26.4** (was 1.26.3). The bump clears three Go standard-library advisories — `GO-2026-5037` (`crypto/x509`), `GO-2026-5038` (`mime`), `GO-2026-5039` (`net/textproto`) — that `govulncheck` began flagging in CI; no masqr code was affected.
+
 ### Fixed
+- **Far fewer false positives on benign code.** Several high-noise recognizers are now keyword-gated, firing only when a relevant keyword sits near the candidate:
+  - `aws-access-key-id` is restricted to genuine `AKIA`/`ASIA` access-key prefixes; the session/role STS prefixes (`AGPA`, `AIDA`, `AROA`, …) that matched high-entropy strings in source snippets were dropped.
+  - `us-ssn`, `ca-sin`, `au-tfn`, `au-acn`, `us-aba-routing`, and `uk-nhs` now require contextual keywords, so bare digit clusters in code no longer block clean prompts.
+  - `se-orgnummer` requires `orgnr`/`orgnummer` context within ±64 bytes, so bare 10-digit Luhn numbers in CLI metadata stop blocking.
+- **Interactive mask-and-continue on external matches.** The gitleaks, digit-id, alnum-id, and keyword sources now populate `Match.Identity`, so the redact-on-repeat / mask-and-continue flow is offered for those findings instead of always hard-blocking.
 - Windows installer (`install.ps1`) aborted on Windows PowerShell 5.x with `Unable to find type [Net.SecurityProtocol]` — the TLS-1.2 line referenced the wrong enum (it's `SecurityProtocolType`). It now `-bor`s TLS 1.2 onto the current protocols inside a `try/catch` (no-op on PowerShell 7+) and silences the progress bar that otherwise throttles the binary download on PS 5.x.
 
 ## [0.2.0] - 2026-06-02
@@ -93,5 +106,7 @@ First public release.
 - Released under **Apache License 2.0**.
 - Bundled `libonnxruntime.so` ships under MIT (Microsoft); bundled PP-OCRv5 models ship under Apache-2.0 (PaddlePaddle Authors). See `NOTICE` and `LICENSES/`.
 
-[Unreleased]: https://github.com/masqrhq/masqr/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/masqrhq/masqr/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/masqrhq/masqr/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/masqrhq/masqr/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/masqrhq/masqr/releases/tag/v0.1.0
