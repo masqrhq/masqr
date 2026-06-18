@@ -41,6 +41,8 @@ func providerCommand(name string) string {
 		return "claude"
 	case "openai":
 		return "codex"
+	case "github-copilot":
+		return "copilot"
 	case "google-gemini", "google-vertex":
 		return "gemini"
 	case "mistral":
@@ -55,7 +57,7 @@ func providerCommand(name string) string {
 // turn). Generic/unknown providers fall back to the plain block envelope.
 func interactiveMaskProvider(name string) bool {
 	switch name {
-	case "antigravity", "anthropic", "openai", "google-gemini", "google-vertex", "mistral":
+	case "antigravity", "anthropic", "openai", "google-gemini", "google-vertex", "mistral", "github-copilot":
 		return true
 	}
 	return false
@@ -72,7 +74,7 @@ func isModelTurnPath(name, path string) bool {
 		return strings.Contains(lp, "/messages")
 	case "openai":
 		return strings.Contains(lp, "/responses")
-	case "mistral":
+	case "mistral", "github-copilot":
 		return strings.Contains(lp, "/chat/completions")
 	case "google-gemini", "google-vertex", "antigravity":
 		return strings.Contains(lp, "generatecontent")
@@ -102,7 +104,7 @@ func latestUserTextFor(name string, body []byte) string {
 	switch name {
 	case "google-gemini", "google-vertex", "antigravity":
 		return latestUserText(body) // Gemini {contents:[…]} (consent.go)
-	case "anthropic", "mistral":
+	case "anthropic", "mistral", "github-copilot":
 		return lastUserFromMessages(body)
 	case "openai":
 		return lastUserFromResponsesInput(body)
@@ -213,7 +215,7 @@ func writeModelTurn(w http.ResponseWriter, provider Provider, text string, strea
 		writeAnthropicModelTurn(w, text, streaming, model)
 	case "openai":
 		writeOpenAIResponsesModelTurn(w, text, streaming, model)
-	case "mistral":
+	case "mistral", "github-copilot":
 		writeOpenAIChatModelTurn(w, text, streaming, model)
 	default:
 		// Should be unreachable (callers gate on interactiveMaskProvider),

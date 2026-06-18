@@ -60,6 +60,11 @@ func TestLookupProviderMatchesBasenames(t *testing.T) {
 		{"mistral-vibe", "mistral", true},
 		{"VIBE", "mistral", true}, // case-insensitive
 
+		{"copilot", "github-copilot", true},
+		{"/usr/local/bin/copilot", "github-copilot", true},
+		{"github-copilot", "github-copilot", true},
+		{"COPILOT", "github-copilot", true}, // case-insensitive
+
 		{"vim", "generic", false}, // unknown → generic fallback
 		{"/usr/local/bin/some-llm", "generic", false},
 	}
@@ -389,6 +394,32 @@ func TestMistralProfileUsesPrepare(t *testing.T) {
 		}
 		if len(p.EnvVars) != 0 {
 			t.Errorf("LookupProvider(%q).EnvVars = %v, want none (vibe ignores env base-URL overrides)", cmd, p.EnvVars)
+		}
+		if !containsFold(p.AuthHeaders, "authorization") {
+			t.Errorf("LookupProvider(%q).AuthHeaders missing authorization: %v", cmd, p.AuthHeaders)
+		}
+	}
+}
+
+// TestGitHubCopilotProfile locks in the Copilot CLI redirect contract: the
+// profile targets the public Copilot API, exports COPILOT_API_URL (the override
+// the CLI honors above its signed-in endpoint), and adds the Authorization
+// header to the redaction set. A regression to the wrong env var would silently
+// no-op the proxy for `masqr copilot`.
+func TestGitHubCopilotProfile(t *testing.T) {
+	for _, cmd := range []string{"copilot", "github-copilot", "/usr/local/bin/copilot", "COPILOT"} {
+		p, ok := LookupProvider(cmd)
+		if !ok {
+			t.Fatalf("LookupProvider(%q): not found", cmd)
+		}
+		if p.Name != "github-copilot" {
+			t.Errorf("LookupProvider(%q).Name = %q, want github-copilot", cmd, p.Name)
+		}
+		if p.Target != "https://api.githubcopilot.com" {
+			t.Errorf("LookupProvider(%q).Target = %q, want https://api.githubcopilot.com", cmd, p.Target)
+		}
+		if len(p.EnvVars) != 1 || p.EnvVars[0] != "COPILOT_API_URL" {
+			t.Errorf("LookupProvider(%q).EnvVars = %v, want [COPILOT_API_URL]", cmd, p.EnvVars)
 		}
 		if !containsFold(p.AuthHeaders, "authorization") {
 			t.Errorf("LookupProvider(%q).AuthHeaders missing authorization: %v", cmd, p.AuthHeaders)

@@ -184,6 +184,35 @@ var mistralProfile = Provider{
 	Prepare:     prepareVibeHome,
 }
 
+// githubCopilotProfile drives GitHub's Copilot CLI (`@github/copilot`, invoked
+// as `copilot`). The CLI resolves its API base from the signed-in user's
+// `copilotUser.endpoints.api` (api.githubcopilot.com for individuals,
+// api.{business,enterprise}.githubcopilot.com for orgs), but honors the
+// COPILOT_API_URL env var as a full override that wins over everything else
+// (recovered from the `Wa()` endpoint resolver in app.js v1.0.63: it returns
+// process.env.COPILOT_API_URL first, logging "Using COPILOT_API_URL from
+// environment"). An http:// value makes the CLI's fetch/SDK clients speak
+// *plaintext* HTTP, so masqr takes the same plain reverse-proxy path as every
+// other provider — no TLS intercept. Verified empirically: with
+// COPILOT_API_URL=http://<listener> the CLI's /models, /mcp, and chat traffic
+// all land on the listener over plaintext.
+//
+// The default wire API is OpenAI chat completions ("completions" — the native
+// CAPI path POSTs `/chat/completions`; the CLI can also speak `/responses` and
+// `/v1/messages`, but those need explicit COPILOT_PROVIDER_WIRE_API). All wire
+// formats and the MCP endpoint share the single api.githubcopilot.com host, so
+// one Target covers everything and no Routes are needed. The API key rides in
+// `Authorization: Bearer`, so that header joins the redaction set. A blocked
+// chat request comes back as a synthetic OpenAI-shaped assistant turn (see
+// interactive.go) so Copilot renders the block advice inline and supports the
+// `mask` reply; non-chat endpoints fall back to the OpenAI 451 envelope.
+var githubCopilotProfile = Provider{
+	Name:        "github-copilot",
+	Target:      "https://api.githubcopilot.com",
+	EnvVars:     []string{"COPILOT_API_URL"},
+	AuthHeaders: []string{"authorization"},
+}
+
 // openAIProfileFor builds the openai/codex profile at lookup time so it
 // can branch on the user's current auth state. Codex picks one of two
 // upstreams depending on how they signed in:
@@ -259,17 +288,19 @@ func isCodexChatGPTAuth() bool {
 // user's current auth state — the placeholder Provider here is replaced
 // before it ever reaches the caller.
 var builtinProviders = map[string]Provider{
-	"claude":       anthropicProfile,
-	"claude-code":  anthropicProfile,
-	"gemini":       geminiProfile,
-	"gemini-cli":   geminiProfile,
-	"codex":        {Name: "openai"}, // placeholder, see openAIProfileFor
-	"openai":       {Name: "openai"}, // placeholder, see openAIProfileFor
-	"agy":          antigravityProfile,
-	"antigravity":  antigravityProfile,
-	"vibe":         mistralProfile,
-	"mistral":      mistralProfile,
-	"mistral-vibe": mistralProfile,
+	"claude":         anthropicProfile,
+	"claude-code":    anthropicProfile,
+	"gemini":         geminiProfile,
+	"gemini-cli":     geminiProfile,
+	"codex":          {Name: "openai"}, // placeholder, see openAIProfileFor
+	"openai":         {Name: "openai"}, // placeholder, see openAIProfileFor
+	"agy":            antigravityProfile,
+	"antigravity":    antigravityProfile,
+	"copilot":        githubCopilotProfile,
+	"github-copilot": githubCopilotProfile,
+	"vibe":           mistralProfile,
+	"mistral":        mistralProfile,
+	"mistral-vibe":   mistralProfile,
 }
 
 // LookupProvider returns the provider profile for the given child command,

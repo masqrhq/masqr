@@ -205,6 +205,7 @@ printf '%s\n' "${DIM}Wrap your coding CLI so secrets never leave your machine:${
 printf '  masqr agy             %s# Google Antigravity\n' "$DIM"
 printf '  masqr claude          %s# Anthropic Claude Code\n' "$DIM"
 printf '  masqr codex           %s# OpenAI Codex\n' "$DIM"
+printf '  masqr copilot         %s# GitHub Copilot CLI\n' "$DIM"
 printf '  masqr gemini -p "…"   %s# Google Gemini\n' "$DIM"
 printf '  masqr vibe            %s# Mistral vibe CLI%s\n' "$DIM" "$RESET"
 printf '%s\n' "Docs: https://github.com/$REPO"

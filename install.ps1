@@ -131,6 +131,7 @@ Write-Host 'Wrap your coding CLI so secrets never leave your machine:' -Foregrou
 Write-Host '  masqr agy             # Google Antigravity'
 Write-Host '  masqr claude          # Anthropic Claude Code'
 Write-Host '  masqr codex           # OpenAI Codex'
+Write-Host '  masqr copilot         # GitHub Copilot CLI'
 Write-Host '  masqr gemini -p "..."  # Google Gemini'
 Write-Host '  masqr vibe            # Mistral vibe CLI'
 Write-Host "Docs: https://github.com/$Repo"

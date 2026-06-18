@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **GitHub Copilot CLI (`copilot`) support via the `COPILOT_API_URL` env var.** The `@github/copilot` CLI normally resolves its API base from the signed-in user's `copilotUser.endpoints.api`, but honors `COPILOT_API_URL` as a full endpoint override that wins over everything else (the `Wa()` endpoint resolver in `app.js` v1.0.63 returns `process.env.COPILOT_API_URL` first). An `http://` value makes its fetch/SDK clients speak plaintext, so `masqr copilot` exports `COPILOT_API_URL=http://<listener>` and takes the same ordinary plaintext reverse-proxy path as every other provider — no TLS intercept. Chat (`/chat/completions`, the default wire API), `/models`, and MCP (`/mcp`) traffic all share the single `api.githubcopilot.com` host. The bearer token rides in `Authorization` (added to the redaction set), and blocked chat turns are delivered as a synthetic OpenAI-shaped assistant turn so the block advice renders inline and the interactive `mask` reply works; non-chat endpoints fall back to the OpenAI 451 envelope. Recognised aliases: `copilot`, `github-copilot`.
+
 ## [0.3.0] - 2026-06-16
 
 ### Added

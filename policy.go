@@ -238,7 +238,7 @@ func writeBlockResponse(w http.ResponseWriter, matches []Match, provider Provide
 				Details: details,
 			},
 		}
-	case "openai":
+	case "openai", "github-copilot":
 		body = openAIBlockedError{
 			Error: openAIBlockedDetail{
 				Message:  msg,
