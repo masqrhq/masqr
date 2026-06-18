@@ -74,7 +74,16 @@ func isModelTurnPath(name, path string) bool {
 		return strings.Contains(lp, "/messages")
 	case "openai":
 		return strings.Contains(lp, "/responses")
-	case "mistral", "github-copilot":
+	case "github-copilot":
+		// Copilot is multi-wire: the conversation turn rides the OpenAI
+		// Responses API for OpenAI models (gpt-5-mini POSTs /responses) and the
+		// Anthropic Messages API for Claude models (claude-haiku-4.5 POSTs
+		// /v1/messages) — both observed live, selected by the active model. Its
+		// /chat/completions traffic is auxiliary (session-title generation) and
+		// /agents/sessions/{id}/events is telemetry; neither is rendered as a
+		// turn, so both fall through to the plain block envelope.
+		return strings.Contains(lp, "/responses") || strings.Contains(lp, "/v1/messages")
+	case "mistral":
 		return strings.Contains(lp, "/chat/completions")
 	case "google-gemini", "google-vertex", "antigravity":
 		return strings.Contains(lp, "generatecontent")
@@ -104,10 +113,18 @@ func latestUserTextFor(name string, body []byte) string {
 	switch name {
 	case "google-gemini", "google-vertex", "antigravity":
 		return latestUserText(body) // Gemini {contents:[…]} (consent.go)
-	case "anthropic", "mistral", "github-copilot":
+	case "anthropic", "mistral":
 		return lastUserFromMessages(body)
 	case "openai":
 		return lastUserFromResponsesInput(body)
+	case "github-copilot":
+		// Multi-wire: a Responses turn carries {input:…}; a Messages turn carries
+		// {messages:…}. Try the Responses shape first, then fall back to messages
+		// so a `mask` reply is recognized on whichever wire the active model uses.
+		if s := lastUserFromResponsesInput(body); s != "" {
+			return s
+		}
+		return lastUserFromMessages(body)
 	}
 	return ""
 }
@@ -215,7 +232,15 @@ func writeModelTurn(w http.ResponseWriter, provider Provider, text string, strea
 		writeAnthropicModelTurn(w, text, streaming, model)
 	case "openai":
 		writeOpenAIResponsesModelTurn(w, text, streaming, model)
-	case "mistral", "github-copilot":
+	case "github-copilot":
+		// Match the wire the request arrived on: Anthropic Messages for a Claude
+		// model (/v1/messages), OpenAI Responses for everything else (/responses).
+		if strings.Contains(strings.ToLower(path), "/v1/messages") {
+			writeAnthropicModelTurn(w, text, streaming, model)
+		} else {
+			writeOpenAIResponsesModelTurn(w, text, streaming, model)
+		}
+	case "mistral":
 		writeOpenAIChatModelTurn(w, text, streaming, model)
 	default:
 		// Should be unreachable (callers gate on interactiveMaskProvider),

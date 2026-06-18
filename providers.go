@@ -197,15 +197,20 @@ var mistralProfile = Provider{
 // COPILOT_API_URL=http://<listener> the CLI's /models, /mcp, and chat traffic
 // all land on the listener over plaintext.
 //
-// The default wire API is OpenAI chat completions ("completions" — the native
-// CAPI path POSTs `/chat/completions`; the CLI can also speak `/responses` and
-// `/v1/messages`, but those need explicit COPILOT_PROVIDER_WIRE_API). All wire
-// formats and the MCP endpoint share the single api.githubcopilot.com host, so
-// one Target covers everything and no Routes are needed. The API key rides in
-// `Authorization: Bearer`, so that header joins the redaction set. A blocked
-// chat request comes back as a synthetic OpenAI-shaped assistant turn (see
-// interactive.go) so Copilot renders the block advice inline and supports the
-// `mask` reply; non-chat endpoints fall back to the OpenAI 451 envelope.
+// The agent loop is *multi-wire*: the conversation turn rides whichever API the
+// active model speaks — the OpenAI Responses API for OpenAI models (gpt-5-mini
+// POSTs `/responses`) and the Anthropic Messages API for Claude models
+// (claude-haiku-4.5 POSTs `/v1/messages`), both observed live (streaming, with
+// an `X-Initiator: user` header). `/chat/completions` carries only auxiliary
+// traffic (session-title generation) and `/agents/sessions/{id}/events` carries
+// session telemetry. So the interactive surface dispatches by request path:
+// `/responses` and `/v1/messages` are the model-turn paths (see interactive.go),
+// each blocked turn answered in that wire's own shape so Copilot renders the
+// advice inline and supports the `mask` reply; other endpoints fall back to the
+// OpenAI 451 envelope. All wire formats and the MCP endpoint share the single
+// api.githubcopilot.com host, so one Target covers everything and no Routes are
+// needed. The API key rides in `Authorization: Bearer`, so that header joins
+// the redaction set.
 var githubCopilotProfile = Provider{
 	Name:        "github-copilot",
 	Target:      "https://api.githubcopilot.com",

@@ -70,6 +70,12 @@ func TestLatestUserTextFor(t *testing.T) {
 			want:     "mask",
 		},
 		{
+			name:     "github-copilot responses input",
+			provider: "github-copilot",
+			body:     `{"model":"gpt-5-mini","input":[{"role":"user","content":[{"type":"input_text","text":"mask"}]}]}`,
+			want:     "mask",
+		},
+		{
 			name:     "gemini contents",
 			provider: "google-gemini",
 			body:     `{"contents":[{"role":"user","parts":[{"text":"mask"}]}]}`,
@@ -189,6 +195,25 @@ func TestCodexMaskConsentFlow(t *testing.T) {
 	runMaskFlow(t, "codex", "/v1/responses", map[string]string{"Content-Encoding": "zstd"}, func(text string) []byte {
 		j := `{"model":"gpt","stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"` + text + `"}]}]}`
 		return mustZstd(t, []byte(j))
+	})
+}
+
+// TestCopilotMaskConsentFlow locks in that GitHub Copilot's agent loop gets the
+// interactive model-turn block + mask-and-continue flow on both of its observed
+// conversation wires — the OpenAI Responses API (/responses, OpenAI models) and
+// the Anthropic Messages API (/v1/messages, Claude models), selected by the
+// active model. A regression that handled only one wire would silently
+// hard-block the other.
+func TestCopilotMaskConsentFlow(t *testing.T) {
+	t.Run("responses", func(t *testing.T) {
+		runMaskFlow(t, "copilot", "/responses", nil, func(text string) []byte {
+			return []byte(`{"model":"gpt-5-mini","stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"` + text + `"}]}]}`)
+		})
+	})
+	t.Run("v1-messages", func(t *testing.T) {
+		runMaskFlow(t, "copilot", "/v1/messages", nil, func(text string) []byte {
+			return []byte(`{"model":"claude-haiku-4.5","stream":true,"messages":[{"role":"user","content":"` + text + `"}]}`)
+		})
 	})
 }
 
