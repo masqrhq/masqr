@@ -14,8 +14,11 @@ GOFLAGS  ?=
 LDFLAGS  ?= -s -w
 TESTARGS ?= -race -count=1 -timeout 5m
 
-# Stamp main.version when set; release builds do this via -ldflags.
-VERSION ?= dev
+# Stamp main.version. Release builds pass the git tag via -ldflags
+# (-X main.version=<tag>); locally we derive a descriptive version from git
+# (e.g. v0.3.0-1-ga1fbfde) so `make build` isn't a bare "dev". Falls back to
+# "dev" outside a git checkout (tarball builds, no tags yet).
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 .PHONY: help all build demo test vet fmt fmt-check lint tidy clean lfs-check lfs-pull
 

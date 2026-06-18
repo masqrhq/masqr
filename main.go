@@ -63,6 +63,7 @@ func main() {
 
 	flag.CommandLine.SetInterspersed(false) // stop parsing at first positional, so child's flags pass through
 	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "masqr %s (%s/%s) — deep prompt inspection for LLM CLIs\n\n", version, runtime.GOOS, runtime.GOARCH)
 		fmt.Fprintf(os.Stderr, "usage: %s [flags] <command> [args...]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "examples: %s claude --resume\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "          %s gemini -p 'summarize this'\n", os.Args[0])
