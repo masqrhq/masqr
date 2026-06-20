@@ -278,6 +278,12 @@ func (s *Scanner) scanRecursive(body []byte, depth int) []Match {
 				out = append(out, m)
 			}
 		}
+
+		// Decode-and-rescan the remaining reversible obfuscations (hex,
+		// base32, URL percent-encoding, HTML numeric entities, gzip+base64).
+		for _, layer := range decodeLayers {
+			out = s.scanDecodedLayer(out, layer.find(body), depth, layer.suffix, layer.decode)
+		}
 	}
 
 	if depth == 0 {
