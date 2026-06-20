@@ -242,40 +242,45 @@ func (s *Scanner) scanRecursive(body []byte, depth int) []Match {
 		}
 	}
 
-	// Decode-and-rescan high-entropy base64 blobs. Catches obfuscation like
-	// `echo $AWS_KEY | base64`.
+	// Decode-and-rescan obfuscated blobs. Catches tricks like
+	// `echo $AWS_KEY | base64` (and base32 / hex / URL- / HTML-entity /
+	// gzip-then-base64 variants) that hide a secret from the literal rules.
 	if depth < maxScanDepth {
 		for _, hit := range findBase64Candidates(body) {
 			decoded, err := tryDecodeBase64(hit.text)
-			if err != nil || !isMostlyPrintable(decoded) {
+			if err != nil {
 				continue
 			}
-			for _, m := range s.scanRecursive(decoded, depth+1) {
-				m.RuleID += "/base64-decoded"
-				// Re-anchor both ends to the outer blob: the inner
-				// offsets are positions inside `decoded`, useless for
-				// rewriting the original body. Treating the whole
-				// blob as the redaction span is correct (and what the
-				// outer generic-base64-blob match already does).
-				m.Offset = hit.offset
-				m.End = hit.offset + len(hit.text)
-				m.Identity = ""
-				out = append(out, m)
+			suffix := "/base64-decoded"
+			if !isMostlyPrintable(decoded) {
+				// `gzip(secret) | base64`: the base64 layer decodes to
+				// gzip bytes (non-printable), so inflate before rescan.
+				inflated, ok := maybeDecompress(decoded)
+				if !ok || !isMostlyPrintable(inflated) {
+					continue
+				}
+				decoded, suffix = inflated, "/gzip-base64-decoded"
 			}
+			out = s.decodeRescan(out, decoded, hit, suffix, depth)
 		}
 
-		// Decode-and-rescan runs of \uXXXX escapes (JS/JSON unicode obfuscation).
+		// Runs of \uXXXX escapes (JS/JSON unicode obfuscation).
 		for _, hit := range findUnicodeEscapeCandidates(body) {
 			decoded, ok := decodeUnicodeEscapes(hit.text)
 			if !ok || !isMostlyPrintable([]byte(decoded)) {
 				continue
 			}
-			for _, m := range s.scanRecursive([]byte(decoded), depth+1) {
-				m.RuleID += "/unicode-decoded"
-				m.Offset = hit.offset
-				m.End = hit.offset + len(hit.text)
-				m.Identity = ""
-				out = append(out, m)
+			out = s.decodeRescan(out, []byte(decoded), hit, "/unicode-decoded", depth)
+		}
+
+		// hex, base32, URL percent-encoding, and HTML numeric entities.
+		for _, t := range transcodings {
+			for _, hit := range t.find(body) {
+				decoded, ok := t.decode(hit.text)
+				if !ok || !isMostlyPrintable(decoded) {
+					continue
+				}
+				out = s.decodeRescan(out, decoded, hit, t.suffix, depth)
 			}
 		}
 	}
@@ -371,6 +376,22 @@ func severityRank(s Severity) int {
 		return 1
 	}
 	return 0
+}
+
+// decodeRescan runs the rule engine over a decoded payload and folds the
+// findings back into out, re-anchoring each to the outer candidate span. The
+// inner offsets are positions inside `decoded` and are useless for rewriting
+// the original body, so the whole blob becomes the redaction span. Identity is
+// cleared because the raw value never appeared verbatim in the body.
+func (s *Scanner) decodeRescan(out []Match, decoded []byte, hit base64Hit, suffix string, depth int) []Match {
+	for _, m := range s.scanRecursive(decoded, depth+1) {
+		m.RuleID += suffix
+		m.Offset = hit.offset
+		m.End = hit.offset + len(hit.text)
+		m.Identity = ""
+		out = append(out, m)
+	}
+	return out
 }
 
 func (s *Scanner) runRule(out []Match, body []byte, r Rule) []Match {
