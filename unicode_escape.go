@@ -22,8 +22,16 @@ import (
 	"strings"
 )
 
-// unicodeEscapeRunPattern matches runs of 4+ contiguous \uXXXX escapes.
-var unicodeEscapeRunPattern = regexp.MustCompile(`(?:\\u[0-9A-Fa-f]{4}){4,}`)
+// unicodeEscapeRunPattern matches runs of 4+ contiguous \uXXXX escapes. The
+// leading backslash count is 1 or 2 so the same path catches a value that
+// arrives JSON-escaped twice: a body carrying the literal text `A` is
+// re-escaped by the transport's JSON encoder to `\\u0041` on the wire, which
+// masqr inspects as raw bytes before any JSON layer un-escapes it.
+var unicodeEscapeRunPattern = regexp.MustCompile(`(?:\\{1,2}u[0-9A-Fa-f]{4}){4,}`)
+
+// unicodeEscapePattern captures the 4 hex digits of a single \uXXXX (or the
+// double-escaped \\uXXXX) escape.
+var unicodeEscapePattern = regexp.MustCompile(`\\{1,2}u([0-9A-Fa-f]{4})`)
 
 func findUnicodeEscapeCandidates(body []byte) []base64Hit {
 	locs := unicodeEscapeRunPattern.FindAllIndex(body, -1)
@@ -39,8 +47,8 @@ func findUnicodeEscapeCandidates(body []byte) []base64Hit {
 
 func decodeUnicodeEscapes(s string) (string, bool) {
 	var b strings.Builder
-	for i := 0; i+6 <= len(s); i += 6 {
-		v, err := strconv.ParseUint(s[i+2:i+6], 16, 32)
+	for _, m := range unicodeEscapePattern.FindAllStringSubmatch(s, -1) {
+		v, err := strconv.ParseUint(m[1], 16, 32)
 		if err != nil {
 			return "", false
 		}
