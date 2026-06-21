@@ -22,15 +22,21 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"strings"
 )
 
 // maybeAttachOCR is a no-op on platforms outside the supported matrix
-// (currently linux/{amd64,arm64}, darwin/arm64, windows/{amd64,arm64}). If a
-// user explicitly opts in via MASQR_OCR=1 we log a loud warning so the silent
-// disable isn't mistaken for "OCR is running but finding nothing."
+// (currently linux/{amd64,arm64}, darwin/arm64, windows/{amd64,arm64}). OCR is
+// enabled by default on supported platforms; here it can never run, so we log a
+// loud warning when the user has not explicitly opted out (MASQR_OCR set to a
+// falsey value) so the silent disable isn't mistaken for "OCR is running but
+// finding nothing."
 func (s *Scanner) maybeAttachOCR() {
-	if os.Getenv("MASQR_OCR") == "1" {
-		log.Printf("scanner: MASQR_OCR=1 ignored — OCR is not bundled for %s/%s "+
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MASQR_OCR"))) {
+	case "0", "false", "no", "off":
+		// Explicitly opted out — stay quiet.
+	default:
+		log.Printf("scanner: OCR not bundled for %s/%s "+
 			"(supported: linux/{amd64,arm64}, darwin/arm64, windows/{amd64,arm64}); "+
 			"see README §Platform support",
 			runtime.GOOS, runtime.GOARCH)

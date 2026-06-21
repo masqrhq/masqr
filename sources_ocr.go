@@ -909,13 +909,29 @@ func ctcDecode(logits []float32, t, v int, vocab []string) string {
 	return sb.String()
 }
 
+// ocrEnabledByEnv reports whether the OCR source should be attached based on
+// the MASQR_OCR environment variable. OCR is ON BY DEFAULT (so 'masqr agy',
+// which forwards screenshots, catches secrets baked into images out of the
+// box). Setting MASQR_OCR to a falsey value ("0", "false", "no", "off") opts
+// out; any other value (including unset or "1") keeps it enabled.
+func ocrEnabledByEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MASQR_OCR"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
 // Reused by Scanner.attachExternalSources.
 func (s *Scanner) maybeAttachOCR() {
-	if os.Getenv("MASQR_OCR") != "1" {
+	if !ocrEnabledByEnv() {
 		return
 	}
 	o, err := newOCRSource(s)
 	if err != nil {
+		// Degrade gracefully: if the OCR models/runtime can't be loaded we log
+		// once and continue without the source rather than failing startup.
 		log.Printf("scanner: OCR source disabled: %v", err)
 		return
 	}
