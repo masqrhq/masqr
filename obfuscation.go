@@ -58,6 +58,14 @@ var decodeLayers = []decodeLayer{
 	{"/url-decoded", findURLPercentCandidates, decodeURLPercent},
 	{"/html-decoded", findHTMLEntityCandidates, decodeHTMLEntities},
 	{"/gzip-decoded", findBase64Candidates, decodeGzipBase64},
+	// Additional on-the-wire normalisations (see normalize.go): a value
+	// double percent-encoded, fullwidth-Unicode, quoted-printable, split by
+	// interleaved whitespace, or folded with a backslash line-continuation.
+	{"/percent-decoded", findDoublePercentCandidates, decodeDoublePercent},
+	{"/fullwidth-decoded", findFullwidthCandidates, decodeFullwidth},
+	{"/qp-decoded", findQuotedPrintableCandidates, decodeQuotedPrintable},
+	{"/whitespace-decoded", findWhitespaceCandidates, decodeWhitespaceInterleaved},
+	{"/continuation-decoded", findLineContinuationCandidates, decodeLineContinuation},
 }
 
 // scanDecodedLayer decodes each candidate, rescans the plaintext one level
