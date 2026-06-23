@@ -210,8 +210,23 @@ func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Dura
 	endpoint := "http://" + ln.Addr().String()
 	printBanner(os.Stderr, endpoint, policy.Provider, logPath)
 
+	// Forward-proxy + MITM: make masqr inspect ALL of the child's HTTPS egress,
+	// not just the one reverse-proxied upstream. setupForwardProxy degrades to a
+	// nil handler (reverse-proxy-only) if the CA can't be generated or written.
+	fp, caPath, bundlePath := setupForwardProxy(logger, policy)
+	var handler http.Handler = newProxy(upstream, logger, policy, nil)
+	var childProxy []string
+	if fp != nil {
+		handler = fp.dispatch(handler)
+		childProxy = childProxyEnv(endpoint, caPath, bundlePath)
+		fmt.Fprintf(os.Stderr, "          forward-proxy CA: %s\n\n", caPath)
+		if bundlePath != "" {
+			defer func() { _ = os.Remove(bundlePath) }()
+		}
+	}
+
 	srv := &http.Server{
-		Handler:           newProxy(upstream, logger, policy, nil),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -250,6 +265,10 @@ func run(cliPath string, cliArgs []string, addr, logPath string, grace time.Dura
 			defer cleanup()
 			extraEnv = pe
 		}
+		// Point the child at masqr's forward proxy + CA. Appended last so the
+		// proxy/cert vars win over any inherited values; harmless (empty) when
+		// the forward proxy degraded out.
+		extraEnv = append(extraEnv, childProxy...)
 		err := runCLI(ctx, cliPath, mergedArgs, policy.Provider.EnvVars, endpoint, extraEnv)
 		stop()
 		return err
