@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -270,6 +271,212 @@ func (rt *redirectTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 		},
 	}
 	return tr.RoundTrip(r)
+}
+
+// TestForwardProxyForwardsAuthHeaderInBlockMode is the auth-safety contract: a
+// request bearing the agent's own Authorization header AND a body that would
+// otherwise trip a finding is, when sent to an OAuth credential endpoint in
+// --on-finding block mode, FORWARDED (not 451). Blocking the agent's own
+// credentials would break its ability to authenticate.
+func TestForwardProxyForwardsAuthHeaderInBlockMode(t *testing.T) {
+	// Upstream stand-in for oauth2.googleapis.com, with its own self-signed CA.
+	upstreamCA := newTestCA(t)
+	upLeaf, err := upstreamCA.leafFor("oauth2.googleapis.com")
+	if err != nil {
+		t.Fatalf("upstream leaf: %v", err)
+	}
+	var gotAuth, gotBody string
+	upLn, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{*upLeaf}})
+	if err != nil {
+		t.Fatalf("tls listen: %v", err)
+	}
+	upSrv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotAuth = r.Header.Get("Authorization")
+			b, _ := io.ReadAll(r.Body)
+			gotBody = string(b)
+			_, _ = w.Write([]byte("ok"))
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() { _ = upSrv.Serve(upLn) }()
+	defer func() { _ = upSrv.Close() }()
+
+	upRoots := x509.NewCertPool()
+	upRoots.AppendCertsFromPEM(upstreamCA.certPEM)
+
+	ca := newTestCA(t)
+	// BLOCK mode: a finding would normally yield 451. The auth-host passthrough
+	// must override that. transport redirects oauth2.googleapis.com to our
+	// loopback TLS server while presenting the real SNI.
+	fp := &forwardProxy{
+		ca:        ca,
+		logger:    log.New(io.Discard, "", 0),
+		policy:    Policy{Threshold: SevLow, Provider: genericProvider, OnFinding: OnFindingBlock},
+		transport: &redirectTransport{to: upLn.Addr().String(), roots: upRoots, serverName: "oauth2.googleapis.com"},
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &http.Server{Handler: fp.dispatch(http.NotFoundHandler()), ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = srv.Serve(ln) }()
+	defer func() { _ = srv.Close() }()
+
+	proxyURL, _ := url.Parse("http://" + ln.Addr().String())
+	roots := x509.NewCertPool()
+	roots.AppendCertsFromPEM(ca.certPEM)
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: roots},
+		},
+	}
+
+	// Body carries credential-shaped material (an AWS key) AND a refresh-token
+	// exchange — exactly the kind of payload block mode would 451 on any other
+	// host. Plus the agent's own bearer token in the Authorization header.
+	body := `{"grant_type":"refresh_token","client_secret":"AKIAIOSFODNN7EXAMPLE"}`
+	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer ya29.agent-own-token")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("auth request through MITM proxy failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusUnavailableForLegalReasons {
+		t.Fatalf("auth exchange was BLOCKED (451); the agent's own credentials must pass through in block mode")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (forwarded)", resp.StatusCode)
+	}
+	if gotAuth != "Bearer ya29.agent-own-token" {
+		t.Errorf("upstream Authorization = %q, want the agent's own token forwarded intact", gotAuth)
+	}
+	if gotBody != body {
+		t.Errorf("upstream body = %q, want the token-exchange body forwarded intact", gotBody)
+	}
+}
+
+func TestIsAuthExchangeHost(t *testing.T) {
+	pass := []string{
+		"accounts.google.com",
+		"oauth2.googleapis.com:443",
+		"www.googleapis.com",
+		"OAUTH2.GOOGLEAPIS.COM",
+		"accounts.google.com.", // trailing dot (FQDN form)
+	}
+	for _, h := range pass {
+		if !isAuthExchangeHost(h) {
+			t.Errorf("isAuthExchangeHost(%q) = false, want true", h)
+		}
+	}
+	block := []string{"api.anthropic.com", "evil.googleapis.com.attacker.com", "generativelanguage.googleapis.com"}
+	for _, h := range block {
+		if isAuthExchangeHost(h) {
+			t.Errorf("isAuthExchangeHost(%q) = true, want false", h)
+		}
+	}
+}
+
+// TestCAPersistFirstRunGeneratesAndPersists covers the first-install path:
+// loadOrCreateCA on an empty dir generates a CA, writes cert+key+version, and
+// the key file is owner-only (0600).
+func TestCAPersistFirstRunGeneratesAndPersists(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ca")
+	logger := log.New(io.Discard, "", 0)
+
+	ca, err := loadOrCreateCA(dir, "v1.0.0", logger)
+	if err != nil {
+		t.Fatalf("loadOrCreateCA: %v", err)
+	}
+	if ca == nil || len(ca.certPEM) == 0 {
+		t.Fatal("expected a generated CA with cert PEM")
+	}
+
+	for _, f := range []string{caCertFile, caKeyFile, caVersionFile} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Errorf("expected %s to be persisted: %v", f, err)
+		}
+	}
+	info, err := os.Stat(filepath.Join(dir, caKeyFile))
+	if err != nil {
+		t.Fatalf("stat key: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("CA key file mode = %o, want 600", perm)
+	}
+	stamp, _ := os.ReadFile(filepath.Join(dir, caVersionFile))
+	if strings.TrimSpace(string(stamp)) != "v1.0.0" {
+		t.Errorf("version stamp = %q, want v1.0.0", strings.TrimSpace(string(stamp)))
+	}
+}
+
+// TestCAPersistSecondRunReuses is the core persistence contract: a second run
+// at the same version REUSES the identical CA rather than regenerating.
+func TestCAPersistSecondRunReuses(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ca")
+	logger := log.New(io.Discard, "", 0)
+
+	first, err := loadOrCreateCA(dir, "v1.0.0", logger)
+	if err != nil {
+		t.Fatalf("first loadOrCreateCA: %v", err)
+	}
+	second, err := loadOrCreateCA(dir, "v1.0.0", logger)
+	if err != nil {
+		t.Fatalf("second loadOrCreateCA: %v", err)
+	}
+
+	if !bytes.Equal(first.certPEM, second.certPEM) {
+		t.Error("second run did not reuse the persisted CA (cert PEM differs)")
+	}
+	if first.cert.SerialNumber.Cmp(second.cert.SerialNumber) != 0 {
+		t.Error("reused CA has a different serial number — it was regenerated, not reused")
+	}
+	// The reloaded key must still sign leaves that chain to the cert.
+	if _, err := second.leafFor("example.com"); err != nil {
+		t.Errorf("reused CA cannot mint a leaf: %v", err)
+	}
+}
+
+// TestCAPersistVersionMismatchRegenerates covers an upgrade: a different stamped
+// version forces a fresh unique CA, and the new version is persisted.
+func TestCAPersistVersionMismatchRegenerates(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ca")
+	logger := log.New(io.Discard, "", 0)
+
+	old, err := loadOrCreateCA(dir, "v1.0.0", logger)
+	if err != nil {
+		t.Fatalf("v1 loadOrCreateCA: %v", err)
+	}
+	upgraded, err := loadOrCreateCA(dir, "v2.0.0", logger)
+	if err != nil {
+		t.Fatalf("v2 loadOrCreateCA: %v", err)
+	}
+
+	if bytes.Equal(old.certPEM, upgraded.certPEM) {
+		t.Error("version change did not regenerate the CA (cert PEM identical)")
+	}
+	stamp, _ := os.ReadFile(filepath.Join(dir, caVersionFile))
+	if strings.TrimSpace(string(stamp)) != "v2.0.0" {
+		t.Errorf("version stamp after upgrade = %q, want v2.0.0", strings.TrimSpace(string(stamp)))
+	}
+	// And the new version is now itself stable across runs.
+	again, err := loadOrCreateCA(dir, "v2.0.0", logger)
+	if err != nil {
+		t.Fatalf("v2 reuse: %v", err)
+	}
+	if !bytes.Equal(upgraded.certPEM, again.certPEM) {
+		t.Error("v2 CA was not reused on the subsequent run")
+	}
 }
 
 func TestChildProxyEnv(t *testing.T) {

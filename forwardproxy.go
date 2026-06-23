@@ -41,9 +41,11 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -101,6 +103,52 @@ func newMITMCA() (*mitmCA, error) {
 		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 		leaves:  make(map[string]*tls.Certificate),
 	}, nil
+}
+
+// caFromPEM rebuilds a *mitmCA from a previously persisted certificate and
+// (PKCS#8) private-key PEM pair. It verifies the key matches the certificate's
+// public key, so a corrupt or mismatched key store is rejected (callers then
+// regenerate) rather than producing leaves that won't validate.
+func caFromPEM(certPEM, keyPEM []byte) (*mitmCA, error) {
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil || certBlock.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("CA cert PEM: no CERTIFICATE block")
+	}
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse CA cert: %w", err)
+	}
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		return nil, fmt.Errorf("CA key PEM: no PEM block")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse CA key: %w", err)
+	}
+	key, ok := parsed.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("CA key is %T, want *ecdsa.PrivateKey", parsed)
+	}
+	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok || !pub.Equal(&key.PublicKey) {
+		return nil, fmt.Errorf("CA private key does not match certificate")
+	}
+	return &mitmCA{
+		cert:    cert,
+		key:     key,
+		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}),
+		leaves:  make(map[string]*tls.Certificate),
+	}, nil
+}
+
+// keyPEM marshals the CA private key as a PKCS#8 PEM block for persistence.
+func (c *mitmCA) keyPEM() ([]byte, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(c.key)
+	if err != nil {
+		return nil, fmt.Errorf("marshal CA key: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), nil
 }
 
 func randSerial() (*big.Int, error) {
@@ -170,10 +218,38 @@ func (c *mitmCA) leafFor(host string) (*tls.Certificate, error) {
 // origin (scheme://host:port) so the destination is fixed by the request
 // itself, not by the provider's route table.
 type forwardProxy struct {
-	ca       *mitmCA
-	logger   *log.Logger
-	policy   Policy
-	handlers sync.Map // origin "scheme://host" -> http.Handler
+	ca     *mitmCA
+	logger *log.Logger
+	policy Policy
+	// transport, when non-nil, is the RoundTripper handed to every per-origin
+	// handler built by handlerFor (production leaves it nil for the default
+	// transport; tests inject one that redirects to a loopback upstream).
+	transport http.RoundTripper
+	handlers  sync.Map // origin "scheme://host" -> http.Handler
+}
+
+// authExchangeHosts are Google's credential endpoints. A wrapped agent posts
+// its OWN OAuth token exchanges here (grant_type=refresh_token with the
+// client_secret/refresh_token in the body), so the SAME scan engine would,
+// in block mode, mistake those credentials for a leak and 451 the exchange —
+// breaking the agent's ability to authenticate. These hosts are therefore
+// forwarded WITHOUT inspection so the agent's own credentials always pass
+// through intact. Leak scanning of arbitrary app egress is unaffected.
+var authExchangeHosts = map[string]struct{}{
+	"accounts.google.com":   {},
+	"oauth2.googleapis.com": {},
+	"www.googleapis.com":    {},
+}
+
+// isAuthExchangeHost reports whether host (optionally "host:port") is one of the
+// agent's own credential endpoints that must never be blocked or stripped.
+func isAuthExchangeHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	_, ok := authExchangeHosts[host]
+	return ok
 }
 
 // newForwardProxy builds a forward proxy. Provider Routes are dropped from the
@@ -195,9 +271,43 @@ func (fp *forwardProxy) handlerFor(scheme, host string) http.Handler {
 		return h.(http.Handler)
 	}
 	u := &url.URL{Scheme: scheme, Host: host}
-	h := newProxy(u, fp.logger, fp.policy, nil)
+	var h http.Handler
+	if isAuthExchangeHost(host) {
+		// The agent's own credential endpoint: forward without inspection so
+		// its OAuth token exchange is never blocked/redacted, even in block mode.
+		h = newPassthroughProxy(u, fp.logger, fp.transport)
+	} else {
+		h = newProxy(u, fp.logger, fp.policy, fp.transport)
+	}
 	actual, _ := fp.handlers.LoadOrStore(key, h)
 	return actual.(http.Handler)
+}
+
+// newPassthroughProxy forwards every request to upstream verbatim — no scan, no
+// block, no redact. It exists solely for the agent's own credential endpoints
+// (see authExchangeHosts). It re-injects Proxy-Authorization, which Go's
+// ReverseProxy would otherwise drop as a hop-by-hop header, so the agent's
+// proxy credential also passes through intact. The request body and the
+// Authorization header are forwarded untouched.
+func newPassthroughProxy(upstream *url.URL, logger *log.Logger, transport http.RoundTripper) http.Handler {
+	logger.Printf("forward-proxy: %s is an auth/OAuth endpoint; forwarding credentials without inspection", upstream.Host)
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(upstream)
+			pr.Out.Host = upstream.Host
+			if v := pr.In.Header.Get("Proxy-Authorization"); v != "" {
+				pr.Out.Header.Set("Proxy-Authorization", v)
+			}
+		},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			logger.Printf("forward-proxy: auth passthrough error for %s: %v", upstream.Host, err)
+			http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
+		},
+	}
+	if transport != nil {
+		proxy.Transport = transport
+	}
+	return proxy
 }
 
 // handleHTTP serves a plain-HTTP forward-proxy request (absolute-form URI),
@@ -328,38 +438,162 @@ func (l *singleConnListener) Accept() (net.Conn, error) {
 func (l *singleConnListener) Close() error   { return nil }
 func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
 
-// setupForwardProxy generates the MITM CA, writes its certificate to the path
-// in MASQR_CA_FILE (default $PWD/masqr-ca.pem), and builds the forward proxy.
-// It returns the proxy, the CA file path, and a CA-bundle path suitable for the
-// child's SSL_CERT_FILE. On any failure it logs and returns a nil proxy so the
-// caller transparently keeps the reverse-proxy-only behaviour.
+// CA store filenames inside the per-install CA directory. The certificate is
+// world-readable (clients must trust it); the key is owner-only (0600).
+const (
+	caCertFile    = "ca-cert.pem"
+	caKeyFile     = "ca-key.pem"
+	caVersionFile = "version"
+)
+
+// masqrCADir is the stable per-install directory that holds the source-of-truth
+// MITM CA (certificate + private key + version stamp). It lives under the OS
+// config dir — <UserConfigDir>/masqr/ca — falling back to the cache dir, and is
+// deliberately NOT $PWD so the CA is reused across runs from any directory.
+// Returns "" when neither a config nor cache dir is resolvable.
+func masqrCADir() string {
+	if base, err := os.UserConfigDir(); err == nil && base != "" {
+		return filepath.Join(base, "masqr", "ca")
+	}
+	if c := masqrCacheDir(); c != "" {
+		return filepath.Join(c, "ca")
+	}
+	return ""
+}
+
+// loadOrCreateCA implements the persistent per-install CA contract: if dir holds
+// a valid CA whose stamped masqr version matches the running binary, that CA is
+// REUSED; otherwise (missing, unreadable, key/cert mismatch, expired, or a
+// version change from an upgrade) a fresh unique CA is generated and persisted.
+// It logs which path was taken and where. The version stamp guarantees a new
+// release regenerates, so leaf certs always trace to the binary that minted them.
+func loadOrCreateCA(dir, version string, logger *log.Logger) (*mitmCA, error) {
+	if ca := tryLoadCA(dir, version); ca != nil {
+		logger.Printf("forward-proxy: reusing persisted MITM CA (masqr %s) at %s", version, dir)
+		return ca, nil
+	}
+	ca, err := newMITMCA()
+	if err != nil {
+		return nil, err
+	}
+	if err := persistCA(ca, dir, version); err != nil {
+		return nil, err
+	}
+	logger.Printf("forward-proxy: generated new MITM CA (masqr %s) and persisted it at %s", version, dir)
+	return ca, nil
+}
+
+// tryLoadCA returns a usable CA from dir only when the cert+key+version files
+// are all present, the stamped version matches, the key matches the cert, and
+// the cert is a currently-valid CA. Any deviation returns nil so the caller
+// regenerates — we never reuse a stale or tampered store.
+func tryLoadCA(dir, version string) *mitmCA {
+	certPEM, err := os.ReadFile(filepath.Join(dir, caCertFile))
+	if err != nil {
+		return nil
+	}
+	keyPEM, err := os.ReadFile(filepath.Join(dir, caKeyFile))
+	if err != nil {
+		return nil
+	}
+	stamp, err := os.ReadFile(filepath.Join(dir, caVersionFile))
+	if err != nil || strings.TrimSpace(string(stamp)) != version {
+		return nil
+	}
+	ca, err := caFromPEM(certPEM, keyPEM)
+	if err != nil {
+		return nil
+	}
+	now := time.Now()
+	if !ca.cert.IsCA || now.Before(ca.cert.NotBefore) || now.After(ca.cert.NotAfter) {
+		return nil
+	}
+	return ca
+}
+
+// persistCA writes the CA cert, private key (mode 0600), and version stamp into
+// dir, creating it owner-only. The key is written first under a restrictive mode
+// so the private material is never momentarily world-readable.
+func persistCA(ca *mitmCA, dir, version string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create CA dir %s: %w", dir, err)
+	}
+	keyPEM, err := ca.keyPEM()
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, caKeyFile), keyPEM, 0o600); err != nil {
+		return fmt.Errorf("write CA key: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, caCertFile), ca.certPEM, 0o644); err != nil {
+		return fmt.Errorf("write CA cert: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, caVersionFile), []byte(version+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write CA version stamp: %w", err)
+	}
+	return nil
+}
+
+// setupForwardProxy resolves the persistent per-install MITM CA (reusing it
+// across runs, regenerating on first install or after an upgrade — see
+// loadOrCreateCA), exports its certificate PEM so the wrapped child can trust
+// masqr's leaves, and builds the forward proxy. The source-of-truth CA lives in
+// masqrCADir; MASQR_CA_FILE only overrides WHERE the cert PEM is exported for
+// clients. On any failure it logs and returns a nil proxy so the caller
+// transparently keeps the reverse-proxy-only behaviour.
 func setupForwardProxy(logger *log.Logger, policy Policy) (fp *forwardProxy, caPath, bundlePath string) {
+	var ca *mitmCA
+	storeDir := masqrCADir()
+	if storeDir != "" {
+		if c, err := loadOrCreateCA(storeDir, version, logger); err != nil {
+			logger.Printf("forward-proxy: persistent CA store unavailable (%v); falling back to an ephemeral in-memory CA", err)
+		} else {
+			ca = c
+		}
+	}
+	if ca == nil {
+		c, err := newMITMCA()
+		if err != nil {
+			logger.Printf("forward-proxy disabled: %v", err)
+			return nil, "", ""
+		}
+		ca = c
+		logger.Printf("forward-proxy: using an ephemeral in-memory MITM CA (no persistent store available)")
+	}
+
+	// MASQR_CA_FILE overrides where the cert PEM is EXPORTED for clients; the
+	// source-of-truth CA still lives in storeDir. With no override the child is
+	// pointed straight at the persisted cert (no copy in $PWD).
+	sourceCert := ""
+	if storeDir != "" {
+		sourceCert = filepath.Join(storeDir, caCertFile)
+	}
 	caPath = os.Getenv("MASQR_CA_FILE")
 	if caPath == "" {
-		if wd, err := os.Getwd(); err == nil {
+		if sourceCert != "" {
+			caPath = sourceCert
+		} else if wd, err := os.Getwd(); err == nil {
 			caPath = filepath.Join(wd, "masqr-ca.pem")
 		} else {
 			caPath = "masqr-ca.pem"
 		}
 	}
-
-	ca, err := newMITMCA()
-	if err != nil {
-		logger.Printf("forward-proxy disabled: %v", err)
-		return nil, "", ""
+	// Export the cert PEM unless caPath already IS the persisted source file
+	// (which loadOrCreateCA already wrote/validated).
+	if caPath != sourceCert {
+		if err := ca.writeCAFile(caPath); err != nil {
+			logger.Printf("forward-proxy disabled: cannot write CA file %s: %v", caPath, err)
+			return nil, "", ""
+		}
 	}
-	if err := ca.writeCAFile(caPath); err != nil {
-		logger.Printf("forward-proxy disabled: cannot write CA file %s: %v", caPath, err)
-		return nil, "", ""
-	}
-	logger.Printf("forward-proxy MITM enabled; CA certificate written to %s", caPath)
+	logger.Printf("forward-proxy MITM enabled; CA certificate available at %s", caPath)
 
 	// Build a trust bundle (system roots + masqr CA) so a child pointed at
 	// SSL_CERT_FILE can still validate any host masqr forwards to, not just
 	// masqr's own leaf certs. Falling back to the bare CA is fine when no
 	// system bundle is found (in proxy mode the child only ever TLS-handshakes
 	// with masqr anyway).
-	bundlePath, err = writeCABundle(ca.certPEM)
+	bundlePath, err := writeCABundle(ca.certPEM)
 	if err != nil {
 		logger.Printf("forward-proxy: trust bundle unavailable (%v); child SSL_CERT_FILE left unset", err)
 		bundlePath = ""
